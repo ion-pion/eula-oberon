@@ -1,0 +1,391 @@
+MODULE Labirint;  (* labirint cu melodie, ca aplicatie Android. O faci cu:  apk Labirint.Mod Labirint
+   Inclini telefonul si bila se rostogoleste prin labirint. Pe drumul spre iesire stau notele Odei bucuriei
+   (Beethoven): bila canta fiecare nota cand trece peste ea. Lumina aurie merge pe drum in ritmul melodiei;
+   daca tii pasul cu ea, melodia iese la tempo. La iesire vezi cate note ai prins in ritm.
+   Fiecare labirint e o fraza; dupa toate patru, melodia se repeta mai repede. *)
+  IMPORT Math, Strings, Os, Ecran, Senzor, Sunet;
+
+  CONST C = 7; R = 11; NC = 77;   (* coloane, randuri, celule; startul e sus-stanga, iesirea jos-dreapta *)
+    MaxN = 24;                    (* note intr-o fraza *)
+    Raza = 0.27;                  (* raza bilei, in celule *)
+    Accel = 16.0;                 (* celule/s^2 la o inclinare de 1 g *)
+    Frecare = 1.6;                (* cat franeaza pe secunda *)
+    VMax = 7.0;                   (* celule/s *)
+    Toleranta = 2.0;              (* cat de departe de lumina (in optimi) mai e "in ritm" *)
+
+  VAR est, sud, est2, sud2, vazut: ARRAY C, R OF BOOLEAN;   (* zid la est / la sud de celula *)
+    stiva, drum, drum2: ARRAY NC OF INTEGER;   (* celula = i + j * C *)
+    L, L2: INTEGER;                            (* lungimea drumului start -> iesire *)
+    n, T, opt: INTEGER;                        (* note; cand vine ultima (optimi); milisecunde pe optime *)
+    hz, durata, t, poz, treapta: ARRAY MaxN OF INTEGER;
+    nume: ARRAY MaxN, 4 OF CHAR;
+    cantat, inRitm: ARRAY MaxN OF BOOLEAN;
+    prinse, nivel, stare: INTEGER;             (* stare: 0 = astept atingerea, 1 = joc, 2 = gata *)
+    pornit, inainte, acord, ok: BOOLEAN;
+    t0, ultim, sclipire, ultimTok, tFinal: INTEGER;   (* ms *)
+    x, y, vx, vy: REAL;                        (* bila, in celule *)
+    fx, fy, zx, zy: REAL;                      (* gravitatia netezita si zero-ul ei (miimi de g) *)
+    seed: INTEGER;
+    violet, violet2, aur, stins, verde, rosu, sticla: INTEGER;
+
+  PROCEDURE Aleator(m: INTEGER): INTEGER;
+  BEGIN
+    seed := seed * 1103515245 + 12345
+    RETURN (seed DIV 65536) MOD 32768 MOD m
+  END Aleator;
+
+  (* ---------------------------------------------------------------- melodia *)
+
+  PROCEDURE Fraza(f: INTEGER);   (* litera = nota, cifra = durata in optimi; g = Sol de jos *)
+    VAR s: ARRAY 64 OF CHAR; i, d: INTEGER; ch: CHAR;
+  BEGIN
+    IF f = 0 THEN s := "E2E2F2G2G2F2E2D2C2C2D2E2E3D1D4"
+    ELSIF f = 2 THEN s := "D2D2E2C2D2E1F1E2C2D2E1F1E2D2C2D2g4"
+    ELSE s := "E2E2F2G2G2F2E2D2C2C2D2E2D3C1C4"
+    END;
+    n := 0; d := 0; i := 0;
+    WHILE (s[i] # 0X) & (n < MaxN) DO
+      ch := s[i];
+      IF ch = "g" THEN hz[n] := 392; treapta[n] := 0; nume[n] := "Sol"
+      ELSIF ch = "C" THEN hz[n] := 523; treapta[n] := 1; nume[n] := "Do"
+      ELSIF ch = "D" THEN hz[n] := 587; treapta[n] := 2; nume[n] := "Re"
+      ELSIF ch = "E" THEN hz[n] := 659; treapta[n] := 3; nume[n] := "Mi"
+      ELSIF ch = "F" THEN hz[n] := 698; treapta[n] := 4; nume[n] := "Fa"
+      ELSE hz[n] := 784; treapta[n] := 5; nume[n] := "Sol"
+      END;
+      durata[n] := ORD(s[i + 1]) - ORD("0");
+      t[n] := d; d := d + durata[n];
+      cantat[n] := FALSE; inRitm[n] := FALSE;
+      INC(n); i := i + 2
+    END;
+    T := t[n - 1]
+  END Fraza;
+
+  (* ---------------------------------------------------------------- labirintul *)
+
+  PROCEDURE Genereaza;   (* labirint perfect, prin backtracking; drumul e stiva in clipa cand ajunge la iesire *)
+    VAR i, j, k, c, nv, sp: INTEGER; vec: ARRAY 4 OF INTEGER;
+  BEGIN
+    FOR i := 0 TO C - 1 DO
+      FOR j := 0 TO R - 1 DO est[i, j] := TRUE; sud[i, j] := TRUE; vazut[i, j] := FALSE END
+    END;
+    sp := 0; stiva[0] := 0; vazut[0, 0] := TRUE; L := 0;
+    WHILE sp >= 0 DO
+      c := stiva[sp]; i := c MOD C; j := c DIV C;
+      IF (c = NC - 1) & (L = 0) THEN
+        L := sp + 1;
+        FOR k := 0 TO sp DO drum[k] := stiva[k] END
+      END;
+      nv := 0;
+      IF (i > 0) & ~vazut[i - 1, j] THEN vec[nv] := c - 1; INC(nv) END;
+      IF (i < C - 1) & ~vazut[i + 1, j] THEN vec[nv] := c + 1; INC(nv) END;
+      IF (j > 0) & ~vazut[i, j - 1] THEN vec[nv] := c - C; INC(nv) END;
+      IF (j < R - 1) & ~vazut[i, j + 1] THEN vec[nv] := c + C; INC(nv) END;
+      IF nv = 0 THEN DEC(sp)
+      ELSE
+        k := vec[Aleator(nv)];
+        IF k = c - 1 THEN est[i - 1, j] := FALSE
+        ELSIF k = c + 1 THEN est[i, j] := FALSE
+        ELSIF k = c - C THEN sud[i, j - 1] := FALSE
+        ELSE sud[i, j] := FALSE
+        END;
+        vazut[k MOD C, k DIV C] := TRUE;
+        INC(sp); stiva[sp] := k
+      END
+    END
+  END Genereaza;
+
+  PROCEDURE Alege;   (* din 40 de labirinte: cel mai scurt drum in care tot incape o celula pe optime *)
+    VAR a, i, j, k: INTEGER; bun: BOOLEAN;
+  BEGIN
+    L2 := 0;
+    FOR a := 1 TO 40 DO
+      Genereaza;
+      IF L2 = 0 THEN bun := TRUE
+      ELSIF L2 - 1 < T THEN bun := L > L2
+      ELSE bun := (L - 1 >= T) & (L < L2)
+      END;
+      IF bun THEN
+        L2 := L;
+        FOR k := 0 TO L - 1 DO drum2[k] := drum[k] END;
+        FOR i := 0 TO C - 1 DO FOR j := 0 TO R - 1 DO est2[i, j] := est[i, j]; sud2[i, j] := sud[i, j] END END
+      END
+    END;
+    L := L2;
+    FOR k := 0 TO L - 1 DO drum[k] := drum2[k] END;
+    FOR i := 0 TO C - 1 DO FOR j := 0 TO R - 1 DO est[i, j] := est2[i, j]; sud[i, j] := sud2[i, j] END END
+  END Alege;
+
+  PROCEDURE Pregateste;   (* fraza, labirintul, notele pe drum, tempoul *)
+    VAR k, m: INTEGER; viteza: REAL;
+  BEGIN
+    Fraza(nivel MOD 4);
+    Alege;
+    FOR k := 0 TO n - 1 DO poz[k] := FLOOR(FLT(t[k]) * FLT(L - 1) / FLT(T) + 0.5) END;
+    FOR k := 1 TO n - 1 DO IF poz[k] <= poz[k - 1] THEN poz[k] := poz[k - 1] + 1 END END;
+    FOR k := n - 1 TO 0 BY -1 DO m := L - n + k; IF poz[k] > m THEN poz[k] := m END END;
+    viteza := 2.6 + 0.35 * FLT(nivel DIV 4);          (* celule pe secunda pentru lumina *)
+    opt := FLOOR(FLT(L - 1) / FLT(T) / viteza * 1000.0);
+    IF opt < 150 THEN opt := 150 END;
+    x := 0.5; y := 0.5; vx := 0.0; vy := 0.0;
+    pornit := FALSE; acord := FALSE; prinse := 0; stare := 0
+  END Pregateste;
+
+  (* ---------------------------------------------------------------- bila *)
+
+  PROCEDURE ZidV(i, j: INTEGER): BOOLEAN;   (* zidul vertical x = i, in randul j *)
+    VAR z: BOOLEAN;
+  BEGIN
+    IF (j < 0) OR (j >= R) THEN z := FALSE
+    ELSIF (i <= 0) OR (i >= C) THEN z := TRUE
+    ELSE z := est[i - 1, j]
+    END
+    RETURN z
+  END ZidV;
+
+  PROCEDURE ZidO(i, j: INTEGER): BOOLEAN;   (* zidul orizontal y = j, in coloana i *)
+    VAR z: BOOLEAN;
+  BEGIN
+    IF (i < 0) OR (i >= C) THEN z := FALSE
+    ELSIF (j <= 0) OR (j >= R) THEN z := TRUE
+    ELSE z := sud[i, j - 1]
+    END
+    RETURN z
+  END ZidO;
+
+  PROCEDURE Loveste(px, py: REAL): BOOLEAN;   (* bila in (px, py) atinge vreun zid? *)
+    VAR i, j: INTEGER; z: BOOLEAN;
+  BEGIN
+    z := FALSE;
+    FOR i := FLOOR(px - Raza) + 1 TO FLOOR(px + Raza) DO
+      FOR j := FLOOR(py - Raza) TO FLOOR(py + Raza) DO IF ZidV(i, j) THEN z := TRUE END END
+    END;
+    FOR i := FLOOR(px - Raza) TO FLOOR(px + Raza) DO
+      FOR j := FLOOR(py - Raza) + 1 TO FLOOR(py + Raza) DO IF ZidO(i, j) THEN z := TRUE END END
+    END
+    RETURN z
+  END Loveste;
+
+  PROCEDURE Misca(dt: REAL);
+    VAR ax, ay, nx, ny, f, v, tare: REAL; pasi, k: INTEGER;
+  BEGIN
+    ax := -(fx - zx) / 1000.0 * Accel; ay := (fy - zy) / 1000.0 * Accel;
+    vx := vx + ax * dt; vy := vy + ay * dt;
+    f := 1.0 - Frecare * dt; IF f < 0.0 THEN f := 0.0 END;
+    vx := vx * f; vy := vy * f;
+    v := Math.sqrt(vx * vx + vy * vy);
+    IF v > VMax THEN vx := vx * VMax / v; vy := vy * VMax / v; v := VMax END;
+    pasi := FLOOR(v * dt / 0.08) + 1; tare := 0.0;
+    FOR k := 1 TO pasi DO
+      nx := x + vx * dt / FLT(pasi);
+      IF Loveste(nx, y) THEN
+        IF ABS(vx) > tare THEN tare := ABS(vx) END;
+        vx := -vx * 0.25
+      ELSE x := nx
+      END;
+      ny := y + vy * dt / FLT(pasi);
+      IF Loveste(x, ny) THEN
+        IF ABS(vy) > tare THEN tare := ABS(vy) END;
+        vy := -vy * 0.25
+      ELSE y := ny
+      END
+    END;
+    IF (tare > 2.5) & (Sunet.Ms() - ultimTok > 120) THEN Sunet.Nota(110, 70, 22); ultimTok := Sunet.Ms() END
+  END Misca;
+
+  PROCEDURE Canta(k: INTEGER; e: REAL);   (* nota k, cantata la e optimi de la pornire *)
+  BEGIN
+    cantat[k] := TRUE;
+    inRitm[k] := ABS(e - FLT(t[k])) <= Toleranta;
+    IF inRitm[k] THEN INC(prinse) END;
+    Sunet.Nota(hz[k], durata[k] * opt + 400, 70);
+    sclipire := Sunet.Ms()
+  END Canta;
+
+  PROCEDURE Note;   (* notele de sub bila, si iesirea *)
+    VAR c, k: INTEGER; e: REAL;
+  BEGIN
+    c := FLOOR(x) + FLOOR(y) * C;
+    IF ~pornit & (c # 0) THEN pornit := TRUE; t0 := Sunet.Ms(); Canta(0, 0.0) END;
+    IF pornit THEN
+      e := FLT(Sunet.Ms() - t0) / FLT(opt);
+      FOR k := 1 TO n - 1 DO IF ~cantat[k] & (drum[poz[k]] = c) THEN Canta(k, e) END END;
+      IF c = NC - 1 THEN stare := 2; tFinal := Sunet.Ms() END
+    END
+  END Note;
+
+  PROCEDURE Lumina(VAR gx, gy: REAL);   (* unde e lumina acum, in celule *)
+    VAR e, p, u: REAL; k, a, b: INTEGER;
+  BEGIN
+    p := 0.0;
+    IF pornit THEN
+      e := FLT(Sunet.Ms() - t0) / FLT(opt);
+      IF e >= FLT(T) THEN p := FLT(L - 1)
+      ELSE
+        k := 0;
+        WHILE (k < n - 2) & (FLT(t[k + 1]) <= e) DO INC(k) END;
+        p := FLT(poz[k]) + FLT(poz[k + 1] - poz[k]) * (e - FLT(t[k])) / FLT(t[k + 1] - t[k])
+      END
+    END;
+    a := FLOOR(p); IF a > L - 2 THEN a := L - 2 END;
+    u := p - FLT(a); b := drum[a + 1]; a := drum[a];
+    gx := FLT(a MOD C) + 0.5 + FLT(b MOD C - a MOD C) * u;
+    gy := FLT(a DIV C) + 0.5 + FLT(b DIV C - a DIV C) * u
+  END Lumina;
+
+  (* ---------------------------------------------------------------- desenul *)
+
+  PROCEDURE CuloareNota(k: INTEGER);
+  BEGIN
+    IF ~cantat[k] THEN Ecran.Culoare(stins)
+    ELSIF inRitm[k] THEN Ecran.Culoare(verde)
+    ELSE Ecran.Culoare(rosu)
+    END
+  END CuloareNota;
+
+  PROCEDURE Banda(w, d: INTEGER);   (* sus: titlul si melodia, ca la karaoke *)
+    VAR mx, lx, baza, pas, k, px, py, qx, qy: INTEGER; e: REAL; s: ARRAY 80 OF CHAR;
+  BEGIN
+    Ecran.Culoare(aur); Ecran.Text(w DIV 2, 30 * d, 18 * d, "LABIRINT");
+    s := "Oda bucuriei  -  fraza "; Strings.AppendInt(nivel MOD 4 + 1, 0, s); Strings.Append(" din 4  -  ", s);
+    Strings.AppendInt(30000 DIV opt, 0, s); Strings.Append(" batai/min", s);
+    Ecran.Culoare(stins); Ecran.Text(w DIV 2, 48 * d, 11 * d, s);
+    mx := 20 * d; lx := w - 2 * mx; baza := 104 * d; pas := 8 * d;
+    Ecran.Grosime(d);
+    FOR k := 1 TO n - 1 DO
+      px := mx + t[k - 1] * lx DIV T; py := baza - treapta[k - 1] * pas;
+      qx := mx + t[k] * lx DIV T; qy := baza - treapta[k] * pas;
+      Ecran.Culoare(stins); Ecran.Linie(px, py, qx, qy)
+    END;
+    FOR k := 0 TO n - 1 DO
+      px := mx + t[k] * lx DIV T; py := baza - treapta[k] * pas;
+      CuloareNota(k);
+      IF cantat[k] THEN Ecran.Disc(px, py, 5 * d) ELSE Ecran.Disc(px, py, 3 * d) END;
+      Ecran.Text(px, baza + 16 * d, 9 * d, nume[k])
+    END;
+    IF pornit & (stare = 1) THEN
+      e := FLT(Sunet.Ms() - t0) / FLT(opt);
+      IF e > FLT(T) THEN e := FLT(T) END;
+      px := mx + FLOOR(e / FLT(T) * FLT(lx));
+      Ecran.Culoare(aur); Ecran.Grosime(2 * d); Ecran.Linie(px, baza - 6 * pas, px, baza + 4 * d)
+    END
+  END Banda;
+
+  PROCEDURE Mesaj(w, h, d: INTEGER; a, b, c: ARRAY OF CHAR);
+    VAR y0: INTEGER;
+  BEGIN
+    y0 := h DIV 2 - 50 * d;
+    Ecran.Culoare(violet2); Ecran.Dreptunghi(0, y0, w, 100 * d);
+    Ecran.Culoare(aur); Ecran.Grosime(d); Ecran.Linie(0, y0, w, y0); Ecran.Linie(0, y0 + 100 * d, w, y0 + 100 * d);
+    Ecran.Text(w DIV 2, y0 + 36 * d, 18 * d, a);
+    Ecran.Culoare(sticla); Ecran.Text(w DIV 2, y0 + 62 * d, 12 * d, b);
+    Ecran.Culoare(stins); Ecran.Text(w DIV 2, y0 + 84 * d, 11 * d, c)
+  END Mesaj;
+
+  PROCEDURE Deseneaza*;   (* o cheama aplicatia la fiecare cadru *)
+    VAR w, h, d, s, ox, oy, sus, jos, i, j, k, c, acum, g, r, px, py: INTEGER;
+      dt, gx, gy, faza: REAL; m1, m2: ARRAY 64 OF CHAR;
+  BEGIN
+    w := Ecran.Latime(); h := Ecran.Inaltime(); d := Ecran.Densitate() DIV 100 + 1;
+    acum := Sunet.Ms();
+    dt := FLT(acum - ultim) / 1000.0; ultim := acum;
+    IF dt > 0.05 THEN dt := 0.05 ELSIF dt < 0.0 THEN dt := 0.0 END;
+    Ecran.Fond(violet);
+    IF ~ok THEN
+      Ecran.Culoare(aur); Ecran.Text(w DIV 2, h DIV 2, 16 * d, "Telefonul n-are senzor de gravitatie")
+    ELSE
+      fx := fx + (FLT(Senzor.GX()) - fx) * 0.3;
+      fy := fy + (FLT(Senzor.GY()) - fy) * 0.3;
+      IF stare = 1 THEN Misca(dt); Note END;
+      IF (stare = 2) & ~acord & (acum - tFinal > 450) THEN
+        acord := TRUE;
+        Sunet.Nota(523, 1800, 30); Sunet.Nota(659, 1800, 26); Sunet.Nota(784, 1800, 26); Sunet.Nota(1047, 1800, 18)
+      END;
+
+      Banda(w, d);
+      sus := 132 * d; jos := 36 * d;
+      s := (w - 24 * d) DIV C;
+      IF (h - sus - jos) DIV R < s THEN s := (h - sus - jos) DIV R END;
+      ox := (w - C * s) DIV 2; oy := sus + (h - sus - jos - R * s) DIV 2;
+
+      (* lumina: un halou sub ziduri *)
+      Lumina(gx, gy);
+      IF pornit & (stare = 1) THEN
+        Ecran.Culoare(violet2); Ecran.Disc(ox + FLOOR(gx * FLT(s)), oy + FLOOR(gy * FLT(s)), s * 9 DIV 20)
+      END;
+      (* notele de pe drum *)
+      FOR k := 0 TO n - 1 DO
+        c := drum[poz[k]];
+        px := ox + (c MOD C) * s + s DIV 2; py := oy + (c DIV C) * s + s DIV 2;
+        CuloareNota(k);
+        IF cantat[k] THEN Ecran.Disc(px, py, s * 4 DIV 25) ELSE Ecran.Disc(px, py, s * 3 DIV 25) END
+      END;
+      (* zidurile *)
+      g := s DIV 12; IF g < 2 THEN g := 2 END;
+      Ecran.Culoare(aur); Ecran.Grosime(g);
+      FOR i := 0 TO C - 1 DO
+        FOR j := 0 TO R - 1 DO
+          px := ox + i * s; py := oy + j * s;
+          IF est[i, j] & (i < C - 1) THEN Ecran.Linie(px + s, py, px + s, py + s); Ecran.Disc(px + s, py, g DIV 2); Ecran.Disc(px + s, py + s, g DIV 2) END;
+          IF sud[i, j] & (j < R - 1) THEN Ecran.Linie(px, py + s, px + s, py + s); Ecran.Disc(px, py + s, g DIV 2); Ecran.Disc(px + s, py + s, g DIV 2) END
+        END
+      END;
+      Ecran.Linie(ox, oy, ox + C * s, oy);
+      Ecran.Linie(ox, oy, ox, oy + R * s);
+      Ecran.Linie(ox + C * s, oy, ox + C * s, oy + R * s);
+      Ecran.Linie(ox, oy + R * s, ox + (C - 1) * s, oy + R * s);
+      (* iesirea: o sageata sub ultima celula *)
+      px := ox + (C - 1) * s + s DIV 2; py := oy + R * s;
+      Ecran.Triunghi(px - s DIV 5, py + s DIV 10, px + s DIV 5, py + s DIV 10, px, py + s * 3 DIV 10);
+      (* bila *)
+      px := ox + FLOOR(x * FLT(s)); py := oy + FLOOR(y * FLT(s)); r := FLOOR(Raza * FLT(s));
+      IF acum - sclipire < 400 THEN
+        Ecran.Culoare(aur); Ecran.Grosime(d * 2); Ecran.Cerc(px, py, r + (acum - sclipire) * s DIV 700)
+      END;
+      Ecran.Culoare(sticla); Ecran.Disc(px, py, r);
+      Ecran.Culoare(aur); Ecran.Grosime(d * 2); Ecran.Cerc(px, py, r);
+      (* lumina: inelul care bate tactul (o bataie = doua optimi) *)
+      IF pornit & (stare = 1) THEN
+        faza := FLT((acum - t0) MOD (2 * opt)) / FLT(2 * opt);
+        Ecran.Culoare(aur); Ecran.Grosime(d * 2);
+        Ecran.Cerc(ox + FLOOR(gx * FLT(s)), oy + FLOOR(gy * FLT(s)), FLOOR(FLT(s) * (0.30 + 0.08 * (1.0 - faza))))
+      END;
+
+      IF stare = 0 THEN
+        IF nivel = 0 THEN m1 := "Labirintul cu melodie" ELSE m1 := "Fraza urmatoare" END;
+        Mesaj(w, h, d, m1, "tine telefonul cum iti vine comod si atinge ecranul",
+          "inclina-l ca sa mergi; tine pasul cu lumina")
+      ELSIF stare = 2 THEN
+        m1 := "Ai prins "; Strings.AppendInt(prinse, 0, m1); Strings.Append(" din ", m1);
+        Strings.AppendInt(n, 0, m1); Strings.Append(" note in ritm", m1);
+        IF prinse = n THEN m2 := "Perfect! Ai cantat fraza la tempo." ELSE m2 := "Verde = in ritm, rosu = pe langa." END;
+        Mesaj(w, h, d, m1, m2, "atinge pentru fraza urmatoare")
+      ELSE
+        Ecran.Culoare(stins); Ecran.Text(w DIV 2, h - 14 * d, 10 * d, "atinge ecranul ca sa recentrezi inclinarea")
+      END
+    END
+  END Deseneaza;
+
+  PROCEDURE Atinge*;   (* la apasare: porneste, recentreaza, sau trece la fraza urmatoare *)
+    VAR acum: BOOLEAN;
+  BEGIN
+    acum := Ecran.Apasat();
+    IF acum & ~inainte THEN
+      IF stare = 0 THEN zx := fx; zy := fy; stare := 1; ultim := Sunet.Ms()
+      ELSIF stare = 1 THEN zx := fx; zy := fy
+      ELSE INC(nivel); Pregateste
+      END
+    END;
+    inainte := acum
+  END Atinge;
+
+BEGIN
+  violet := Ecran.RGB(22, 4, 42); violet2 := Ecran.RGB(44, 14, 78);
+  aur := Ecran.RGB(201, 168, 94); stins := Ecran.RGB(140, 116, 70);
+  verde := Ecran.RGB(92, 214, 130); rosu := Ecran.RGB(222, 112, 128); sticla := Ecran.RGB(214, 196, 120);
+  seed := Os.CurrentTime() * 7919 + Sunet.Ms();
+  fx := 0.0; fy := 0.0; zx := 0.0; zy := 0.0;
+  nivel := 0; inainte := FALSE; ultim := Sunet.Ms(); sclipire := -1000; ultimTok := 0;
+  ok := Senzor.PornesteGravitatia();
+  Pregateste
+END Labirint.

@@ -1,0 +1,77 @@
+**EULA**
+
+*Un neuron digital pe substrat Z₇³ — arhitectură conceptuală și prototip minimal*
+
+Jahbalon Research — notă de concept, versiunea 0.1
+
+Ion Paraschiv (Pion) · Claude Sonnet
+
+# Rezumat
+
+Această notă descrie o arhitectură conceptuală pentru un model de limbaj minimal („Eula”), gândit ca al șaptelea modul al ecosistemului NOREBO, construit direct pe substratul geometric Z₇³ dezvoltat de autor de-a lungul a aproximativ 20 de ani, și pe mecanismele de traversare reversibilă introduse de ILYRIUM (Salamandra Cipher). Spre deosebire de un transformer clasic, unde atenția se calculează dens peste toate perechile de tokenuri (O(n²)), Eula propune o traversare rară dar completă a unui lattice toroidal 7×7×7 (343 noduri), cu rutare determinată geometric și o regulă de învățare fără mecanism de diferențiere automată (autodiff). Am construit și rulat trei prototipuri minimale în Python care confirmă principiile de bază — convergență, reversibilitate, și extensia la 7 cuburi cuplate prin salturi de tip Fibonacci. Documentul include și un set de întrebări geometrice deschise, ridicate în cursul discuției, care rămân de rezolvat înainte de o implementare completă.
+
+# 1. Context și motivație
+
+Cadrul Z₇³ este un lattice toroidal 7×7×7 (343 de noduri), cu frecvențele fiecărui nod date de formula f(x,y,z) = 256 × (3/2)ˣ × 2ʸ × (7/4)ᶻ, ale cărei valori sunt demonstrat unice pe toate liniile și planele axiale (Z7 Latin Cube). Pe acest fundament au fost construite deja mai multe sisteme: Cubicum FS, un filesystem toroidal care adresează fișiere prin coordonate (x,y,z) în loc de căi ierarhice; și ILYRIUM, o implementare concretă a cifrului Salamandra, bazată pe 7 cuburi toroidale Z₇³, fiecare sărind la următorul cu un offset de tip Fibonacci, cu o cheie aflată în mișcare continuă — imprevizibilă statistic, dar determinată matematic.
+
+NOREBO este stratul de orchestrare al autorului, scris în Oberon-07, gândit ca șase module mapate pe cazurile gramaticale (kārakas) din gramatica sanscrită a lui Pāṇini: Nephilim, Opal, Roler, Euridice, Binomial, Orfeu. Din discuție a reieșit firesc un al șaptelea modul — Eula — cel care „vorbește”, un LLM minimal, construit ca prototip izolat înainte de a fi conectat la restul sistemului.
+
+# 2. Arhitectura conceptuală a lui Eula
+
+## 2.1 Cubul ca unitate de calcul
+
+Unitatea de bază e cubul Z₇³ (343 noduri). Fiecare nod conține 6 „piramide” — vârf în centrul nodului, bază = o față — fiecare reprezentând o instrucțiune de verificat, analog unui cap de atenție (attention head) dintr-un transformer. Scorul fiecărei piramide e produsul scalar dintre vectorul ei de ponderi și vectorul de intrare (embedding-ul tokenului curent).
+
+## 2.2 Traversare și reversibilitate
+
+Traversarea celor 343 de noduri urmează un pas fix de +2 (index modulo 343). Deoarece gcd(2, 343) = 1, acest pas garantează acoperirea completă a tuturor celor 343 de noduri într-un singur ciclu, fără repetiție. Pasul admite un invers modular (2⁻¹ mod 343 = 172), deci traseul poate fi reconstruit exact mergând înapoi, fără a fi nevoie să se stocheze întreaga stare intermediară — proprietate esențială pentru o eventuală regulă de învățare fără autodiff.
+
+## 2.3 Saturație și generarea răspunsului
+
+La fiecare nod vizitat, informația e rutată spre piramida cu scorul cel mai mare (“cea mai plină”), garantând un traseu nevid prin cub — un mecanism analog rutării din Mixture-of-Experts, dar geometric în loc de o listă plată de experți. Scorurile alese se acumulează pe parcursul traseului. Răspunsul (output-ul) apare atunci când toate cele 6 piramide ale unui nod ajung simultan la saturație — un model de tip integrate-and-fire, dar cu condiție de coincidență pe 6 canale paralele, nu un singur prag.
+
+## 2.4 Stare persistentă prin rotația cubului
+
+Un ciclu complet corespunde unui singur token procesat. Informația acumulată într-un ciclu nu se pierde: cubul “se rotește” cu o cantitate derivată din output-ul acumulat, iar tokenul următor moștenește această rotație. Memoria secvenței trăiește astfel în rearanjarea fizică a nodurilor, nu într-un vector ascuns separat, cum ar fi cazul la un RNN clasic.
+
+## 2.5 Extensia ILYRIUM: șapte cuburi și salt Fibonacci
+
+Urmând arhitectura ILYRIUM, sistemul complet nu folosește un singur cub, ci 7 cuburi independente, fiecare cu propria stare de rotație. Tokenurile sar de la un cub la altul după un offset dat de șirul Fibonacci (mod 7), nu un pas fix — introducând o componentă suplimentară de tip cheie mobilă. În interiorul fiecărui cub, traversarea rămâne pasul fix +2, pentru a păstra garanția de acoperire completă și reversibilitatea.
+
+# 3. O regulă de învățare minimală
+
+Deoarece scorul e un produs scalar, gradientul lui față de ponderi e chiar vectorul de intrare — nu e nevoie de un mecanism de diferențiere automată. Regula de actualizare folosită e regula delta (Widrow-Hoff): pentru fiecare nod vizitat, ponderile piramidei alese se ajustează cu o cantitate proporțională cu produsul dintre eroare (țintă − output) și vectorul de intrare. Reversibilitatea traversării înlocuiește nevoia de a stoca activările intermediare pentru propagarea înapoi a erorii (backpropagation), fiindcă traseul poate fi refăcut exact prin pasul invers.
+
+# 4. Rezultate din prototipurile Python
+
+Au fost construite și rulate trei prototipuri minimale, pe date-jucărie, pentru a verifica principiile de mai sus:
+
+- Cub unic, regulă delta: pornind de la ponderi aleatoare, eroarea medie pătratică a scăzut de la 1082.7 la aproximativ 0 în 30 de epoci, pe 4 tokenuri-jucărie cu ținte scalare fixe.
+
+- Stare persistentă (rotație) între tokenuri: aceeași convergență (eroare finală ≈ 0.015), cu rotația cubului variind vizibil de la o epocă la alta (137 → 183 → 290 → 4 → 52 → 90), confirmând că starea persistentă nu împiedică învățarea.
+
+- Șapte cuburi, salt Fibonacci: prima variantă a eșuat să învețe (eroare finală ≈ 89) pentru că pointerul de cub curent nu era resetat între epoci, ceea ce ducea aceleași tokenuri spre cuburi diferite de la o epocă la alta. După separarea stării de secvență (pointerul de cub, resetabil) de starea de memorie pe termen lung (rotațiile, persistente), eroarea a scăzut la 0.06, cu un traseu stabil prin cele 7 cuburi.
+
+Un prototip separat a explorat ideea unui neuron digital neuromorfic, cu 20 de “dendrite” (12 diagonale de față + 8 de spațiu) convergând spre un nod central, folosind integrare cu scurgere (leaky integrate-and-fire) — simulare care a produs 21 de evenimente de tip spike din 40 de pași de timp, pe date de test aleatoare.
+
+# 5. Întrebări geometrice deschise
+
+Discuția a scos la iveală mai multe puncte unde intuiția geometrică a autorului a depășit prototipul actual, și care rămân de rezolvat:
+
+- Proporția corectă a piramidelor: înălțimea trebuie să fie exact jumătate din latura cubului (h = a/2), cu bază pătrată reală (4 fețe), nu conică.
+
+- Fiecare față a unui cub e comună cu piramida cubului vecin de pe acea față — cele două piramide, vârf în vârf prin fața comună, formează o bipiramidă “împrumutată” între cuburile vecine, nu o structură strict interioară fiecărui cub.
+
+- Rotația unui nod, dacă e memorată (nu doar înlocuită) la fiecare ciclu, produce un tipar tot mai dens de “vârfuri” — verificat numeric: 5 rotații succesive, la unghiul deficitului unghiular real (≈ 77.88°, din arccos(1/3)), în jurul unei diagonale de spațiu a cubului, produc 30 de vârfuri distincte, fără nicio suprapunere, distribuite pe două conuri (≈ 54.7° și ≈ 125.3° față de axă) — o consecință directă a faptului că unghiul deficitului nu e o fracțiune rațională din 360°.
+
+- Direcție viitoare, neconfirmată încă: coordonarea tetraedrică (≈ 109.47°, suplementul exact al deficitului unghiular de 70.53°) sugerează o posibilă legătură cu structura cristalină a diamantului — două rețele FCC interpătrunse — ca alternativă la simetria pur octaedrică (6 piramide pe fețe) folosită până acum. Ideea a fost reținută ca linie de cercetare, nu dezvoltată încă.
+
+# 6. Stadiul actual și pașii următori
+
+Eula rămâne, la acest stadiu, un prototip conceptual izolat, nu încă integrat în NOREBO (unde doar Nephilim și Opal sunt confirmate funcționale). Abordarea aleasă este construirea independentă a lui Eula, urmată de conectare ulterioară la restul ecosistemului, mai degrabă decât proiectarea completă a tuturor celor șapte module înainte de a începe.
+
+Pași plauzibili următori: rezolvarea structurii geometrice corecte a nodului (piramide cu proporții corecte, posibil coordonare tetraedrică în loc de octaedrică); o regulă STDP pentru neuronul neuromorfic cu dendrite diagonale; și, separat, o extensie audio a arhitecturii (sinteză vocală bazată pe formanți, explorată deja ca prototip minimal folosind osciloarele Cubicum și grid-ul de frecvențe Z₇³).
+
+# Concluzie
+
+Deși încă incompletă geometric, arhitectura Eula demonstrează că principiile deja dezvoltate în Z₇³ și ILYRIUM — traversare reversibilă, rutare determinată geometric, stare persistentă prin rotație — pot susține o regulă de învățare funcțională fără mecanismele grele de calcul (autodiff, atenție densă O(n²)) folosite de arhitecturile de tip transformer. Construcția a urmat deviza declarată a autorului: construiesc mai întâi, demonstrez după.

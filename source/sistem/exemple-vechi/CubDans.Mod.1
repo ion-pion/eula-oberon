@@ -1,0 +1,420 @@
+MODULE Nephilim;
+
+CONST
+  Inactiv*   = 0;
+  Corpuscul* = 1;
+  Unda*      = 2;
+  SuperPos*  = 3;
+
+TYPE
+  Node* = RECORD
+    state* : INTEGER;
+    freq*  : REAL;
+    r*,g*,b* : INTEGER
+  END;
+  Cube* = ARRAY 7, 7, 7 OF Node;
+
+PROCEDURE Power(base: REAL; exp: INTEGER): REAL;
+  VAR result: REAL; i: INTEGER;
+BEGIN
+  result := 1.0;
+  FOR i := 1 TO exp DO
+    result := result * base
+  END;
+  RETURN result
+END Power;
+
+PROCEDURE Freq*(x, y, z: INTEGER): REAL;
+BEGIN
+  RETURN 256.0 * Power(1.5, x) * Power(2.0, y) * Power(1.75, z)
+END Freq;
+
+PROCEDURE Init*(VAR c: Cube);
+VAR x,y,z: INTEGER;
+BEGIN
+  FOR x := 0 TO 6 DO
+    FOR y := 0 TO 6 DO
+      FOR z := 0 TO 6 DO
+        c[x][y][z].state := Inactiv;
+        c[x][y][z].freq  := Freq(x, y, z);
+        c[x][y][z].r := x * 42;
+        c[x][y][z].g := y * 42;
+        c[x][y][z].b := z * 42
+      END
+    END
+  END
+END Init;
+
+PROCEDURE SetState*(VAR c: Cube; x,y,z,s: INTEGER);
+BEGIN c[x][y][z].state := s END SetState;
+
+PROCEDURE GetState*(c: Cube; x,y,z: INTEGER): INTEGER;
+BEGIN RETURN c[x][y][z].state END GetState;
+
+END Nephilim.
+
+MODULE CorziZ7;  (* instrumentele Nephilim din SonicZ7.Mod si MeetZ7.Mod (Pion), mutate in Eula: in loc de pipe
+   catre play, scriu esantioanele intr-un buffer pe care il canta Sunet.Reda. Coarda ciupita e Karplus-Strong. *)
+  IMPORT Math, Nephilim;
+
+  CONST Scurt* = 1597; Mediu* = 17711; Lung* = 46368;   (* durate Fibonacci, in esantioane la 44100 Hz *)
+
+  VAR noiseSeed: REAL; pi: REAL;
+
+  PROCEDURE Frac(v: REAL): REAL;
+  BEGIN RETURN v - FLT(FLOOR(v)) END Frac;
+
+  PROCEDURE Noise(): REAL;
+  BEGIN
+    noiseSeed := noiseSeed + 0.7548776662;
+    RETURN Frac(Math.sin(noiseSeed * 12.9898) * 43758.5453) * 2.0 - 1.0
+  END Noise;
+
+  PROCEDURE Curata*(VAR b: ARRAY OF REAL; n: INTEGER);
+    VAR k: INTEGER;
+  BEGIN FOR k := 0 TO n - 1 DO b[k] := 0.0 END
+  END Curata;
+
+  PROCEDURE NormalizeOctave*(f: REAL): REAL;
+  BEGIN
+    WHILE f > 2000.0 DO f := f / 2.0 END;
+    WHILE f < 100.0 DO f := f * 2.0 END;
+    RETURN f
+  END NormalizeOctave;
+
+  (* nodul cubului cel mai apropiat de frecventa hz (in orice octava); intoarce frecventa nodului adusa langa hz *)
+  PROCEDURE Aproape*(hz: REAL; VAR bx, by, bz: INTEGER): REAL;
+    VAR x, y, z: INTEGER; f, err, best, bf: REAL;
+  BEGIN
+    best := 1.0E9; bf := hz; bx := 0; by := 0; bz := 0;
+    FOR x := 0 TO 6 DO
+      FOR y := 0 TO 6 DO
+        FOR z := 0 TO 6 DO
+          f := Nephilim.Freq(x, y, z);
+          WHILE f >= hz * 1.41421 DO f := f / 2.0 END;
+          WHILE f < hz / 1.41421 DO f := f * 2.0 END;
+          err := ABS(Math.ln(f / hz));
+          IF (err < best - 0.0001) OR (ABS(err - best) <= 0.0001) & (x + y + z < bx + by + bz) THEN
+            best := err; bf := f; bx := x; by := y; bz := z
+          END
+        END
+      END
+    END
+    RETURN bf
+  END Aproape;
+
+  (* coarda ciupita (din MeetZ7.Pluck): se aduna in b *)
+  PROCEDURE Pluck*(VAR b: ARRAY OF REAL; freq, energy, bright: REAL; nSamples: INTEGER);
+    VAR i, kn, read: INTEGER; kbuf: ARRAY 2205 OF REAL; cur, nxt, decay, amp: REAL;
+  BEGIN
+    kn := FLOOR(44100.0 / freq);
+    IF kn < 4 THEN kn := 4 END;
+    IF kn > 2205 THEN kn := 2205 END;
+    amp := energy * 9000.0;
+    decay := 0.995 - 0.05 * (1.0 - energy);
+    FOR i := 0 TO kn - 1 DO kbuf[i] := amp * Noise() END;
+    read := 0;
+    FOR i := 0 TO nSamples - 1 DO
+      cur := kbuf[read];
+      nxt := kbuf[(read + 1) MOD kn];
+      kbuf[read] := (bright * cur + (1.0 - bright) * nxt) * decay;
+      b[i] := b[i] + cur;
+      read := (read + 1) MOD kn
+    END
+  END Pluck;
+
+  (* Corpuscul (din SonicZ7.RenderCorpuscul): click percutant *)
+  PROCEDURE Corpuscul*(VAR b: ARRAY OF REAL; freq: REAL);
+    VAR k, attackN: INTEGER; t, o, env: REAL;
+  BEGIN
+    attackN := Scurt DIV 8;
+    FOR k := 0 TO Scurt - 1 DO
+      t := FLT(k) / 44100.0;
+      o := Math.sin(2.0 * pi * freq * t);
+      IF k < attackN THEN env := FLT(k) / FLT(attackN)
+      ELSE env := 1.0 - FLT(k - attackN) / FLT(Scurt - attackN)
+      END;
+      b[k] := b[k] + 9000.0 * o * env
+    END
+  END Corpuscul;
+
+  (* SuperPozitie (ca in MeetZ7): fundamentala, cvinta si octava, ciupite deodata *)
+  PROCEDURE SuperPos*(VAR b: ARRAY OF REAL; freq, energy: REAL; n: INTEGER);
+  BEGIN
+    Pluck(b, freq, energy, 0.85, n);
+    Pluck(b, freq * 1.5, energy * 0.6, 0.85, n);
+    Pluck(b, freq * 2.0, energy * 0.4, 0.85, n)
+  END SuperPos;
+
+  (* coada: ultimele m esantioane se sting, ca sunetul sa nu se taie brusc *)
+  PROCEDURE Stinge*(VAR b: ARRAY OF REAL; n, m: INTEGER);
+    VAR k: INTEGER;
+  BEGIN
+    IF m > n THEN m := n END;
+    FOR k := 0 TO m - 1 DO b[n - m + k] := b[n - m + k] * FLT(m - k) / FLT(m) END
+  END Stinge;
+
+BEGIN
+  noiseSeed := 0.12345; pi := 3.14159265
+END CorziZ7.
+
+MODULE CubDans;  (* dans prin cubul Z7, ca aplicatie Android. O faci cu:  apk CubDans.Mod CubDans
+   Fisierul are trei module: Nephilim (cubul), CorziZ7 (instrumentele din SonicZ7/MeetZ7) si CubDans.
+   O bila pluteste prin cubul 7x7x7. Inclini telefonul: bila merge pe x (stanga-dreapta) si y (sus-jos).
+   Saltul: ridici telefonul brusc = un strat z mai sus; il cobori brusc = un strat mai jos.
+   Te invarti cu telefonul (busola): bila trece si asa prin straturile z, un strat la 51 de grade.
+   Cubul e tor: iesi printr-o parte, intri prin cealalta. Fiecare nod are sunetul lui (Nephilim.Freq) si culoarea
+   lui (r, g, b = x, y, z ori 42): cand bila intra intr-un nod, il auzi si ecranul ia culoarea lui.
+   Sunetul merge pe bataie (Tempo): la fiecare bataie suna nodul in care esti. Ai trecut in alt nod repede =
+   Corpuscul (ciupit scurt), incet = Unda (coarda lunga); stai pe loc 4 batai = SuperPozitie (acord).
+   Frecventele sunt aduse in octava calda, 130..520 Hz.
+   Fara busola, straturile z le schimbi atingand jumatatea de sus / de jos a ecranului.
+   Tii degetul pe ecran o secunda: recentrez inclinarea si busola (stratul de acum devine z = 0). *)
+  IMPORT Math, Strings, Ecran, Senzor, Sunet, Nephilim, CorziZ7;
+
+  CONST N = 7;
+    Viteza = 9.0;        (* noduri/s la o inclinare de 1 g *)
+    VMax = 4.0;          (* noduri/s *)
+    Mort = 40.0;         (* inclinari mai mici (miimi de g) nu misca bila *)
+    Strat = 51.43;       (* grade de rotire pentru un strat z (360 / 7) *)
+    Urma = 14;           (* cate noduri tine minte urma *)
+    Repede = 1.6;        (* peste atatea noduri/s, nota e Corpuscul *)
+    Tempo = 96;          (* batai pe minut *)
+    Salt = 220;          (* miimi de g: cat de brusc ridici / cobori telefonul ca sa schimbi stratul *)
+
+  VAR x, y, fx, fy, zx, zy: REAL;
+    z, nx, ny, nz, az0, azAcum, apasatDin, ultimaNota, intrat: INTEGER;
+    busola, gravitatie, miscare, inainte, superCantat, recentrat, schimbat: BOOLEAN;
+    zBusola, zSalt, ultimSalt, directieSalt, bataie, stat, ultimaBataie: INTEGER; vitezaAcum: REAL;
+    urmaX, urmaY, urmaZ, urmaT: ARRAY Urma OF INTEGER; urmaN: INTEGER;
+    buf: ARRAY CorziZ7.Lung OF REAL;
+    ultim, sclipire: INTEGER;
+    violet, aur, stins, sticla: INTEGER;
+
+  PROCEDURE Prag(v: REAL): REAL;
+  BEGIN
+    IF v > Mort THEN v := v - Mort ELSIF v < -Mort THEN v := v + Mort ELSE v := 0.0 END
+    RETURN v
+  END Prag;
+
+  PROCEDURE Tor(v: REAL): REAL;   (* aduce v in [0, 7) *)
+  BEGIN
+    WHILE v < 0.0 DO v := v + FLT(N) END;
+    WHILE v >= FLT(N) DO v := v - FLT(N) END
+    RETURN v
+  END Tor;
+
+  PROCEDURE Hz(x, y, z: INTEGER): REAL;
+    VAR f: REAL;
+  BEGIN
+    f := Nephilim.Freq(x, y, z);
+    WHILE f >= 520.0 DO f := f / 2.0 END;
+    WHILE f < 130.0 DO f := f * 2.0 END
+    RETURN f
+  END Hz;
+
+  PROCEDURE NumeNota(f: REAL; VAR s: ARRAY OF CHAR);   (* cea mai apropiata nota din pian, ca reper *)
+    VAR k: INTEGER;
+  BEGIN
+    k := FLOOR(12.0 * Math.ln(f / 261.63) / Math.ln(2.0) + 0.5);
+    k := k MOD 12;
+    IF k = 0 THEN s := "Do" ELSIF k = 1 THEN s := "Do#" ELSIF k = 2 THEN s := "Re" ELSIF k = 3 THEN s := "Mib"
+    ELSIF k = 4 THEN s := "Mi" ELSIF k = 5 THEN s := "Fa" ELSIF k = 6 THEN s := "Fa#" ELSIF k = 7 THEN s := "Sol"
+    ELSIF k = 8 THEN s := "Lab" ELSIF k = 9 THEN s := "La" ELSIF k = 10 THEN s := "Sib" ELSE s := "Si"
+    END
+  END NumeNota;
+
+  PROCEDURE Culoare(x, y, z, procent, baza: INTEGER): INTEGER;   (* culoarea nodului, stinsa la procent *)
+  BEGIN
+    RETURN Ecran.RGB(baza + x * 42 * procent DIV 100, baza + y * 42 * procent DIV 100, baza + z * 42 * procent DIV 100)
+  END Culoare;
+
+  PROCEDURE Suna(fel, volum: INTEGER);   (* 1 = Corpuscul (repede), 2 = Unda (incet), 3 = SuperPozitie (pe loc) *)
+    VAR f: REAL; n: INTEGER;
+  BEGIN
+    f := Hz(nx, ny, nz);
+    IF fel = 1 THEN
+      n := CorziZ7.Mediu; CorziZ7.Curata(buf, n);
+      CorziZ7.Pluck(buf, f, 0.55, 0.5, n); CorziZ7.Corpuscul(buf, f * 2.0)
+    ELSIF fel = 2 THEN
+      n := CorziZ7.Mediu * 2; CorziZ7.Curata(buf, n); CorziZ7.Pluck(buf, f, 0.85, 0.7, n)
+    ELSE
+      n := CorziZ7.Lung; CorziZ7.Curata(buf, n); CorziZ7.SuperPos(buf, f, 0.9, n)
+    END;
+    CorziZ7.Stinge(buf, n, 5000);
+    Sunet.Reda(buf, n, volum);
+    ultimaNota := Sunet.Ms(); sclipire := ultimaNota
+  END Suna;
+
+  PROCEDURE Intra(viteza: REAL);   (* bila a intrat intr-un nod nou *)
+    VAR k: INTEGER;
+  BEGIN
+    FOR k := Urma - 1 TO 1 BY -1 DO
+      urmaX[k] := urmaX[k - 1]; urmaY[k] := urmaY[k - 1]; urmaZ[k] := urmaZ[k - 1]; urmaT[k] := urmaT[k - 1]
+    END;
+    urmaX[0] := nx; urmaY[0] := ny; urmaZ[0] := nz; urmaT[0] := Sunet.Ms();
+    IF urmaN < Urma THEN INC(urmaN) END;
+    intrat := Sunet.Ms(); superCantat := FALSE; schimbat := TRUE; stat := 0
+  END Intra;
+
+  PROCEDURE Bate;   (* la fiecare bataie: suna nodul in care esti *)
+  BEGIN
+    INC(bataie);
+    IF schimbat THEN
+      schimbat := FALSE;
+      IF vitezaAcum > Repede THEN Suna(1, 80) ELSE Suna(2, 75) END
+    ELSE
+      INC(stat);
+      IF (stat >= 4) & ~superCantat THEN superCantat := TRUE; Suna(3, 70)
+      ELSIF ~superCantat & (bataie MOD 2 = 0) THEN Suna(2, 30)
+      END
+    END
+  END Bate;
+
+  PROCEDURE Pas(dt: REAL);
+    VAR vx, vy, v: REAL; ax, ay, az, a: INTEGER;
+  BEGIN
+    IF gravitatie THEN
+      fx := fx + (FLT(Senzor.GX()) - fx) * 0.2; fy := fy + (FLT(Senzor.GY()) - fy) * 0.2;
+      vx := -Prag(fx - zx) / 1000.0 * Viteza; vy := Prag(fy - zy) / 1000.0 * Viteza
+    ELSE vx := 0.0; vy := 0.0
+    END;
+    v := Math.sqrt(vx * vx + vy * vy);
+    IF v > VMax THEN vx := vx * VMax / v; vy := vy * VMax / v; v := VMax END;
+    x := Tor(x + vx * dt); y := Tor(y + vy * dt);
+    IF busola THEN
+      a := Senzor.Azimut();
+      IF a >= 0 THEN
+        azAcum := a;
+        IF az0 < 0 THEN az0 := a END;
+        zBusola := FLOOR(FLT((a - az0 + 360 + 26) MOD 360) / Strat) MOD N
+      END
+    END;
+    IF miscare THEN   (* saltul: primul varf decide directia; varful invers (cand opresti telefonul) e ignorat *)
+      a := Senzor.Sus();
+      IF (Sunet.Ms() - ultimSalt > 450) & ((a > Salt) OR (a < -Salt)) THEN
+        IF a > 0 THEN directieSalt := 1 ELSE directieSalt := -1 END;
+        zSalt := zSalt + directieSalt; ultimSalt := Sunet.Ms()
+      END
+    END;
+    z := ((zBusola + zSalt) MOD N + N) MOD N;
+    vitezaAcum := v;
+    ax := FLOOR(x); ay := FLOOR(y); az := z;
+    IF (ax # nx) OR (ay # ny) OR (az # nz) THEN nx := ax; ny := ay; nz := az; Intra(v) END;
+    IF Sunet.Ms() - ultimaBataie >= 60000 DIV Tempo THEN ultimaBataie := ultimaBataie + 60000 DIV Tempo;
+      IF Sunet.Ms() - ultimaBataie > 60000 DIV Tempo THEN ultimaBataie := Sunet.Ms() END;
+      Bate
+    END
+  END Pas;
+
+  PROCEDURE Deseneaza*;
+    VAR w, h, d, c, ox, oy, i, j, k, px, py, r, acum, varsta, zx0, zy0, zl: INTEGER;
+      dt, f: REAL; s, t: ARRAY 64 OF CHAR;
+  BEGIN
+    w := Ecran.Latime(); h := Ecran.Inaltime(); d := Ecran.Densitate() DIV 100 + 1;
+    acum := Sunet.Ms(); dt := FLT(acum - ultim) / 1000.0; ultim := acum;
+    IF dt > 0.05 THEN dt := 0.05 ELSIF dt < 0.0 THEN dt := 0.0 END;
+    Pas(dt);
+    IF inainte & ~recentrat & (acum - apasatDin > 1000) THEN
+      recentrat := TRUE; zx := fx; zy := fy; IF busola THEN az0 := azAcum; zBusola := 0 END; zSalt := 0;
+      Sunet.Nota(523, 300, 25)
+    END;
+
+    (* fondul: culoarea nodului in care esti, stinsa *)
+    Ecran.Fond(Culoare(nx, ny, nz, 22, 10));
+    f := Hz(nx, ny, nz);
+    Ecran.Culoare(aur); Ecran.Text(w DIV 2, 34 * d, 18 * d, "CUB Z7");
+    s := "nodul ("; Strings.AppendInt(nx, 0, s); Strings.Append(",", s); Strings.AppendInt(ny, 0, s);
+    Strings.Append(",", s); Strings.AppendInt(nz, 0, s); Strings.Append(")   ", s);
+    Strings.AppendInt(FLOOR(f + 0.5), 0, s); Strings.Append(" Hz   ~", s); NumeNota(f, t); Strings.Append(t, s);
+    Ecran.Culoare(sticla); Ecran.Text(w DIV 2, 58 * d, 13 * d, s);
+
+    (* stratul z curent: 7 x 7 noduri, fiecare cu culoarea lui *)
+    c := (w - 64 * d) DIV N;
+    IF (h - 200 * d) DIV N < c THEN c := (h - 200 * d) DIV N END;
+    ox := 16 * d; oy := (h - N * c) DIV 2 + 10 * d;
+    FOR i := 0 TO N - 1 DO
+      FOR j := 0 TO N - 1 DO
+        Ecran.Culoare(Culoare(i, j, z, 45, 18));
+        Ecran.Dreptunghi(ox + i * c + 2, oy + j * c + 2, c - 4, c - 4)
+      END
+    END;
+    (* urma: nodurile prin care ai trecut, pe stratul asta, se sting in 3 secunde *)
+    FOR k := urmaN - 1 TO 0 BY -1 DO
+      varsta := acum - urmaT[k];
+      IF (urmaZ[k] = z) & (varsta < 3000) THEN
+        Ecran.Culoare(Culoare(urmaX[k], urmaY[k], urmaZ[k], 100 - varsta DIV 40, 60 - varsta DIV 60));
+        r := c * (3000 - varsta) DIV 9000 + c DIV 10;
+        Ecran.Disc(ox + urmaX[k] * c + c DIV 2, oy + urmaY[k] * c + c DIV 2, r)
+      END
+    END;
+    (* nodul curent *)
+    Ecran.Culoare(Culoare(nx, ny, nz, 100, 0)); Ecran.Dreptunghi(ox + nx * c + 2, oy + ny * c + 2, c - 4, c - 4);
+    (* bila *)
+    px := ox + FLOOR(x * FLT(c)); py := oy + FLOOR(y * FLT(c)); r := c * 3 DIV 10;
+    IF acum - sclipire < 500 THEN
+      Ecran.Culoare(aur); Ecran.Grosime(2 * d); Ecran.Cerc(px, py, r + (acum - sclipire) * c DIV 800)
+    END;
+    Ecran.Culoare(sticla); Ecran.Disc(px, py, r);
+    Ecran.Culoare(aur); Ecran.Grosime(2 * d); Ecran.Cerc(px, py, r);
+
+    (* bataia: rama aurie care pulseaza *)
+    k := acum - ultimaBataie;
+    IF k < 120 THEN
+      Ecran.Culoare(aur); Ecran.Grosime(3 * d);
+      Ecran.Linie(ox, oy, ox + N * c, oy); Ecran.Linie(ox, oy + N * c, ox + N * c, oy + N * c);
+      Ecran.Linie(ox, oy, ox, oy + N * c); Ecran.Linie(ox + N * c, oy, ox + N * c, oy + N * c)
+    END;
+    (* saltul: o sageata langa coloana z *)
+    IF acum - ultimSalt < 600 THEN
+      Ecran.Culoare(aur); px := w - 30 * d; py := oy - 40 * d;
+      IF directieSalt > 0 THEN Ecran.Triunghi(px - 14 * d, py + 10 * d, px + 14 * d, py + 10 * d, px, py - 14 * d)
+      ELSE Ecran.Triunghi(px - 14 * d, py - 10 * d, px + 14 * d, py - 10 * d, px, py + 14 * d)
+      END
+    END;
+    (* coloana z: cele 7 straturi, cel curent aprins *)
+    zx0 := ox + N * c + 10 * d; zl := w - zx0 - 10 * d; zy0 := oy;
+    FOR k := 0 TO N - 1 DO
+      IF k = z THEN Ecran.Culoare(Culoare(nx, ny, k, 100, 0)) ELSE Ecran.Culoare(Culoare(nx, ny, k, 35, 15)) END;
+      Ecran.Dreptunghi(zx0, zy0 + k * c + 2, zl, c - 4)
+    END;
+    Ecran.Culoare(aur); Ecran.Grosime(2 * d); Ecran.Linie(zx0 - 4 * d, zy0 + z * c + c DIV 2, zx0, zy0 + z * c + c DIV 2);
+    Ecran.Culoare(stins); Ecran.Text(zx0 + zl DIV 2, zy0 - 8 * d, 10 * d, "z");
+
+    Ecran.Culoare(stins);
+    IF miscare THEN Ecran.Text(w DIV 2, h - 34 * d, 11 * d, "inclina: x, y     ridica / coboara brusc: z")
+    ELSIF busola THEN Ecran.Text(w DIV 2, h - 34 * d, 11 * d, "inclina: x si y      invarte-te: z")
+    ELSE Ecran.Text(w DIV 2, h - 34 * d, 11 * d, "inclina: x si y      atinge sus / jos: z")
+    END;
+    Ecran.Text(w DIV 2, h - 16 * d, 10 * d, "tine degetul o secunda: recentrez")
+  END Deseneaza;
+
+  PROCEDURE Atinge*;
+    VAR acum: BOOLEAN;
+  BEGIN
+    acum := Ecran.Apasat();
+    IF acum & ~inainte THEN
+      apasatDin := Sunet.Ms(); recentrat := FALSE;
+      IF ~busola & ~miscare THEN
+        IF Ecran.AtinsY() < Ecran.Inaltime() DIV 2 THEN DEC(zSalt) ELSE INC(zSalt) END
+      END
+    END;
+    inainte := acum
+  END Atinge;
+
+BEGIN
+  violet := Ecran.RGB(22, 4, 42); aur := Ecran.RGB(201, 168, 94);
+  stins := Ecran.RGB(150, 128, 84); sticla := Ecran.RGB(232, 216, 150);
+  x := 3.5; y := 3.5; z := 3; nx := 3; ny := 3; nz := 3;
+  fx := 0.0; fy := 0.0; zx := 0.0; zy := 0.0; az0 := -1; azAcum := 0;
+  urmaN := 0; inainte := FALSE; recentrat := TRUE; superCantat := TRUE;
+  ultim := Sunet.Ms(); sclipire := -1000; ultimaNota := 0; intrat := 0;
+  gravitatie := Senzor.PornesteGravitatia();
+  busola := Senzor.Porneste();
+  miscare := Senzor.PornesteMiscarea();
+  zBusola := 0; zSalt := 3; ultimSalt := -1000; directieSalt := 1; bataie := 0; stat := 0;
+  ultimaBataie := Sunet.Ms(); schimbat := FALSE; vitezaAcum := 0.0;
+  (* prima clipa: zero-ul inclinarii e cum tii telefonul cand pornesti *)
+  zx := FLT(Senzor.GX()); zy := FLT(Senzor.GY()); fx := zx; fy := zy;
+  IF zx * zx + zy * zy < 1.0 THEN zx := 0.0; zy := 300.0; fx := 0.0; fy := 300.0 END
+END CubDans.

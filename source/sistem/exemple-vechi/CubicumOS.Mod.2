@@ -1,0 +1,2031 @@
+(* Cubicum OS v1.1 pentru Eula Oberon: patru module intr-un fisier: Cubicum FS, Tor7 (procesorul si memoria),
+   Salamandra (nucleul) si sistemul. Faci aplicatia cu:   apk CubicumOS.Mod "Cubicum OS"   *)
+
+MODULE CubicumFS;  (* Cubicum FS: fisierele nu stau pe cai, ci in cubul toroidal Z7^3, la adresa (x, y, z) data de ce sunt:
+     x = numele (suma codurilor literelor MOD 7), y = tipul (dupa extensie), z = ziua in care s-a nascut (MOD 7).
+     Cele 8 colturi ale cubului sunt cele 8 radacini: fiecare fisier tine de coltul cel mai apropiat.
+     Doua fisiere pe aceeasi celula: al doilea merge mai departe pe tor (x+1, apoi y+1, apoi z+1) si ciocnirea ramane in Ash.
+     Tot cubul sta intr-un singur fisier, cfs.z7, in dosarul aplicatiei. *)
+  IMPORT Files, Strings, Os;
+
+  CONST Max* = 343; LN* = 32; LC* = 1600; NA* = 8; LA* = 96; Semn = 7343;
+
+  TYPE Fis = RECORD nume: ARRAY LN OF CHAR; cont: ARRAY LC OF CHAR; x, y, z, zi: INTEGER END;
+
+  VAR f: ARRAY Max OF Fis; n: INTEGER;
+    loc: ARRAY 343 OF INTEGER;                (* celula -> fisierul de pe ea, -1 = libera *)
+    ash: ARRAY NA OF ARRAY LA OF CHAR; na: INTEGER;
+    cale, tmp: ARRAY 160 OF CHAR;
+    scris: BOOLEAN;                           (* a mers ultima salvare *)
+
+  PROCEDURE Tip*(nume: ARRAY OF CHAR): INTEGER;   (* y: 0 text, 1 pachet, 2 acord, 3 ash, 4 program (.z7), 5 pagina, 6 altceva *)
+    VAR i, p, t: INTEGER; e: ARRAY 8 OF CHAR;
+  BEGIN
+    p := -1; i := 0;
+    WHILE (i < LEN(nume)) & (nume[i] # 0X) DO IF nume[i] = "." THEN p := i END; INC(i) END;
+    e := "";
+    IF (p >= 0) & (i - p - 1 < LEN(e)) THEN Strings.Extract(nume, p + 1, i - p - 1, e) END;
+    IF e = "txt" THEN t := 0 ELSIF e = "pkg" THEN t := 1 ELSIF e = "crda" THEN t := 2 ELSIF e = "ash" THEN t := 3
+    ELSIF (e = "z7") OR (e = "mod") OR (e = "Mod") THEN t := 4 ELSIF e = "html" THEN t := 5 ELSE t := 6
+    END;
+    RETURN t
+  END Tip;
+
+  PROCEDURE NumeTip*(t: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN
+    IF t = 0 THEN s := "text" ELSIF t = 1 THEN s := "pachet" ELSIF t = 2 THEN s := "acord" ELSIF t = 3 THEN s := "ash"
+    ELSIF t = 4 THEN s := "program" ELSIF t = 5 THEN s := "pagină" ELSE s := "altceva"
+    END
+  END NumeTip;
+
+  PROCEDURE SumaNume*(nume: ARRAY OF CHAR): INTEGER;   (* x-ul ideal *)
+    VAR i, s: INTEGER;
+  BEGIN
+    s := 0; i := 0;
+    WHILE (i < LEN(nume)) & (nume[i] # 0X) DO s := s + ORD(nume[i]); INC(i) END;
+    RETURN s MOD 7
+  END SumaNume;
+
+  PROCEDURE Azi*(): INTEGER;   (* zile de la 1 ianuarie 2010 *)
+  BEGIN RETURN Os.CurrentTime() DIV 86400
+  END Azi;
+
+  PROCEDURE Cel(x, y, z: INTEGER): INTEGER;
+  BEGIN RETURN x + 7 * y + 49 * z
+  END Cel;
+
+  PROCEDURE Refa;
+    VAR i: INTEGER;
+  BEGIN
+    FOR i := 0 TO 342 DO loc[i] := -1 END;
+    FOR i := 0 TO n - 1 DO loc[Cel(f[i].x, f[i].y, f[i].z)] := i END
+  END Refa;
+
+  PROCEDURE PuneAsh*(s: ARRAY OF CHAR);   (* o eroare pastrata: Ash tine ultimele NA *)
+    VAR i: INTEGER;
+  BEGIN
+    IF na = NA THEN FOR i := 0 TO NA - 2 DO ash[i] := ash[i + 1] END; DEC(na) END;
+    Strings.Copy(s, ash[na]); INC(na)
+  END PuneAsh;
+
+  PROCEDURE Pune3(x, y, z: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN
+    Strings.AppendInt(x, 0, s); Strings.Append(".", s); Strings.AppendInt(y, 0, s); Strings.Append(".", s);
+    Strings.AppendInt(z, 0, s)
+  END Pune3;
+
+  PROCEDURE Salveaza(): BOOLEAN;
+    VAR g: Files.File; i, r: INTEGER; ok: BOOLEAN;
+  BEGIN
+    g := Files.Create(tmp); ok := g # NIL;
+    IF ok THEN
+      Files.WriteInt(g, Semn); Files.WriteInt(g, n);
+      FOR i := 0 TO n - 1 DO
+        Files.WriteStr(g, f[i].nume); Files.WriteStr(g, f[i].cont);
+        Files.WriteInt(g, f[i].x); Files.WriteInt(g, f[i].y); Files.WriteInt(g, f[i].z); Files.WriteInt(g, f[i].zi)
+      END;
+      Files.WriteInt(g, na);
+      FOR i := 0 TO na - 1 DO Files.WriteStr(g, ash[i]) END;
+      ok := Files.Status(g) = Files.OK; Files.Close(g);
+      IF ok THEN
+        IF Files.Exists(cale) THEN r := Files.Delete(cale) END;
+        ok := Files.Rename(tmp, cale) = Files.OK
+      END
+    END;
+    scris := ok;
+    RETURN ok
+  END Salveaza;
+
+  PROCEDURE Incarca(): BOOLEAN;
+    VAR g: Files.File; i, k, m: INTEGER; ok: BOOLEAN;
+  BEGIN
+    ok := FALSE; n := 0; na := 0;
+    g := Files.Open(cale);
+    IF g # NIL THEN
+      IF Files.ReadInt(g) = Semn THEN
+        m := Files.ReadInt(g);
+        IF (m < 0) OR (m > Max) THEN m := 0 END;
+        FOR i := 0 TO m - 1 DO
+          k := Files.ReadStr(g, f[n].nume); k := Files.ReadStr(g, f[n].cont);
+          f[n].x := Files.ReadInt(g) MOD 7; f[n].y := Files.ReadInt(g) MOD 7; f[n].z := Files.ReadInt(g) MOD 7;
+          f[n].zi := Files.ReadInt(g);
+          INC(n)
+        END;
+        m := Files.ReadInt(g);
+        IF (m < 0) OR (m > NA) THEN m := 0 END;
+        FOR i := 0 TO m - 1 DO k := Files.ReadStr(g, ash[na]); INC(na) END;
+        ok := Files.Status(g) = Files.OK
+      END;
+      Files.Close(g)
+    END;
+    Refa;
+    RETURN ok
+  END Incarca;
+
+  PROCEDURE Porneste*(): BOOLEAN;   (* deschide cubul; TRUE = cub nou, gol (prima pornire) *)
+    VAR d: ARRAY 128 OF CHAR; nou: BOOLEAN;
+  BEGIN
+    Os.GetEnv(d, "CFS_DOSAR");
+    IF d = "" THEN
+      d := "/data/data/ro.jahbalon.oberon.cubicumos";
+      IF ~Files.Exists(d) THEN d := "." END
+    END;
+    Strings.Copy(d, cale); Strings.Append("/cfs.z7", cale);
+    Strings.Copy(d, tmp); Strings.Append("/cfs.tmp", tmp);
+    n := 0; na := 0; scris := TRUE;
+    IF Files.Exists(cale) THEN nou := ~Incarca() ELSE Refa; nou := TRUE END;
+    RETURN nou
+  END Porneste;
+
+  PROCEDURE Cenusa*(s: ARRAY OF CHAR);   (* o eroare in Ash, scrisa si pe disc *)
+  BEGIN PuneAsh(s); IF ~Salveaza() THEN END
+  END Cenusa;
+
+  PROCEDURE N*(): INTEGER;
+  BEGIN RETURN n
+  END N;
+
+  PROCEDURE Gaseste*(nume: ARRAY OF CHAR): INTEGER;   (* indicele, -1 = nu e *)
+    VAR i, r: INTEGER;
+  BEGIN
+    r := -1; i := 0;
+    WHILE (r < 0) & (i < n) DO IF f[i].nume = nume THEN r := i END; INC(i) END;
+    RETURN r
+  END Gaseste;
+
+  PROCEDURE Scrie*(nume, cont: ARRAY OF CHAR): INTEGER;   (* creeaza sau rescrie; intoarce indicele, -1 = n-a mers *)
+    VAR i, x, y, z, x1, y1, z1, k: INTEGER; s: ARRAY LA OF CHAR;
+  BEGIN
+    i := Gaseste(nume);
+    IF i >= 0 THEN
+      Strings.Copy(cont, f[i].cont)
+    ELSIF n = Max THEN
+      s := "CFS plin (343 celule): "; Strings.Append(nume, s); PuneAsh(s)
+    ELSE
+      x := SumaNume(nume); y := Tip(nume); z := Azi() MOD 7;
+      k := 0; x1 := x; y1 := y; z1 := z;
+      WHILE loc[Cel(x1, y1, z1)] >= 0 DO
+        INC(k); x1 := (x + k) MOD 7; y1 := (y + k DIV 7) MOD 7; z1 := (z + k DIV 49) MOD 7
+      END;
+      i := n; INC(n);
+      Strings.Copy(nume, f[i].nume); Strings.Copy(cont, f[i].cont);
+      f[i].x := x1; f[i].y := y1; f[i].z := z1; f[i].zi := Azi();
+      loc[Cel(x1, y1, z1)] := i;
+      IF k > 0 THEN
+        s := "coliziune: "; Strings.Append(nume, s); Strings.Append(" ", s); Pune3(x, y, z, s);
+        Strings.Append(" → ", s); Pune3(x1, y1, z1, s); PuneAsh(s)
+      END
+    END;
+    IF (i >= 0) & ~Salveaza() THEN PuneAsh("nu pot scrie cubul pe disc") END;
+    RETURN i
+  END Scrie;
+
+  PROCEDURE Arde*(i: INTEGER);   (* sterge fisierul i *)
+    VAR k: INTEGER;
+  BEGIN
+    IF (i >= 0) & (i < n) THEN
+      FOR k := i TO n - 2 DO f[k] := f[k + 1] END;
+      DEC(n); Refa;
+      IF ~Salveaza() THEN PuneAsh("nu pot scrie cubul pe disc") END
+    END
+  END Arde;
+
+  PROCEDURE Nume*(i: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN IF (i >= 0) & (i < n) THEN Strings.Copy(f[i].nume, s) ELSE s := "" END
+  END Nume;
+
+  PROCEDURE Continut*(i: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN IF (i >= 0) & (i < n) THEN Strings.Copy(f[i].cont, s) ELSE s := "" END
+  END Continut;
+
+  PROCEDURE Adresa*(i: INTEGER; VAR x, y, z: INTEGER);
+  BEGIN IF (i >= 0) & (i < n) THEN x := f[i].x; y := f[i].y; z := f[i].z ELSE x := 0; y := 0; z := 0 END
+  END Adresa;
+
+  PROCEDURE AdresaText*(i: INTEGER; VAR s: ARRAY OF CHAR);   (* "x.y.z" *)
+    VAR x, y, z: INTEGER;
+  BEGIN Adresa(i, x, y, z); s := ""; Pune3(x, y, z, s)
+  END AdresaText;
+
+  PROCEDURE Radacina*(i: INTEGER): INTEGER;   (* coltul (0..7) de care tine fisierul: bitii x>3, y>3, z>3 *)
+    VAR x, y, z, r: INTEGER;
+  BEGIN
+    Adresa(i, x, y, z); r := 0;
+    IF x > 3 THEN r := r + 1 END; IF y > 3 THEN r := r + 2 END; IF z > 3 THEN r := r + 4 END;
+    RETURN r
+  END Radacina;
+
+  PROCEDURE NumeRadacina*(r: INTEGER; VAR s: ARRAY OF CHAR);   (* coltul ca adresa: 0.0.0 ... 6.6.6 *)
+  BEGIN s := ""; Pune3(r MOD 2 * 6, r DIV 2 MOD 2 * 6, r DIV 4 * 6, s)
+  END NumeRadacina;
+
+  PROCEDURE LaCelula*(x, y, z: INTEGER): INTEGER;
+  BEGIN RETURN loc[Cel(x MOD 7, y MOD 7, z MOD 7)]
+  END LaCelula;
+
+  PROCEDURE NrAsh*(): INTEGER;
+  BEGIN RETURN na
+  END NrAsh;
+
+  PROCEDURE Ash*(k: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN IF (k >= 0) & (k < na) THEN Strings.Copy(ash[k], s) ELSE s := "" END
+  END Ash;
+
+  PROCEDURE Scris*(): BOOLEAN;
+  BEGIN RETURN scris
+  END Scris;
+
+BEGIN
+  n := 0; na := 0; scris := TRUE; Refa
+END CubicumFS.
+
+MODULE Tor7;  (* procesorul si memoria lui Cubicum OS: torul Z7 in 7 dimensiuni, 7^7 = 823543 celule, fiecare o cifra 0..6.
+     Celula i are coordonatele d0..d6 = cifrele lui i in baza 7. A 7-a dimensiune e spirala: mersul pe spirala e i+1,
+     d0 se invarte cel mai repede, iar d6 numara turele spiralei (7 ture de 7^6 = 117649 celule).
+     Codul si datele stau in aceleasi celule. Totul e pe tor: adresa N e iar 0.
+     Campul: suma tuturor celulelor MOD 7, plus numarul de scrieri. O scriere oriunde il schimba pe loc,
+     deci toata structura o simte deodata (cine asteapta campul se trezeste in aceeasi runda). *)
+
+  CONST N* = 823543; Tura* = 117649;
+
+  VAR c: ARRAY N OF BYTE; camp, scrieri, ultima: INTEGER;
+
+  PROCEDURE Citeste*(i: INTEGER): INTEGER;
+  BEGIN RETURN c[i MOD N]
+  END Citeste;
+
+  PROCEDURE Scrie*(i, v: INTEGER);
+    VAR k: INTEGER;
+  BEGIN
+    i := i MOD N; v := v MOD 7;
+    k := c[i];
+    camp := (camp + v - k + 7) MOD 7;
+    c[i] := v; INC(scrieri); ultima := i
+  END Scrie;
+
+  PROCEDURE Camp*(): INTEGER;
+  BEGIN RETURN camp
+  END Camp;
+
+  PROCEDURE Scrieri*(): INTEGER;
+  BEGIN RETURN scrieri
+  END Scrieri;
+
+  PROCEDURE Ultima*(): INTEGER;   (* ultima celula scrisa, -1 = niciuna *)
+  BEGIN RETURN ultima
+  END Ultima;
+
+  PROCEDURE Coord*(i: INTEGER; VAR d: ARRAY OF INTEGER);   (* cele 7 coordonate ale celulei i *)
+    VAR k: INTEGER;
+  BEGIN
+    i := i MOD N;
+    FOR k := 0 TO 6 DO d[k] := i MOD 7; i := i DIV 7 END
+  END Coord;
+
+  PROCEDURE Index*(d: ARRAY OF INTEGER): INTEGER;   (* inversul lui Coord *)
+    VAR k, i: INTEGER;
+  BEGIN
+    i := 0;
+    FOR k := 6 TO 0 BY -1 DO i := i * 7 + d[k] MOD 7 END;
+    RETURN i
+  END Index;
+
+  PROCEDURE Arde*;   (* Burn: torul se goleste *)
+    VAR i: INTEGER;
+  BEGIN
+    FOR i := 0 TO N - 1 DO c[i] := 0 END;
+    camp := 0; scrieri := 0; ultima := -1
+  END Arde;
+
+BEGIN
+  Arde
+END Tor7.
+
+MODULE Salamandra;  (* nucleul lui Cubicum OS: Oul care nu se misca. Tine 7 procese reale, cate unul pe fiecare tura a spiralei
+     din Tor7 (slotul s are celulele s*7^6 .. (s+1)*7^6 - 1), le asambleaza codul din Cubicum FS direct in tor si le ruleaza
+     pe rand. Burn goleste torul si procesele; raman doar Ash si Cubicum FS.
+     O instructiune = 4 celule: op DIV 7, op MOD 7, a, b (toate cifre 0..6). Registrele R0..R6 tin numere intregi.
+     Programele (.z7) sunt text: o instructiune pe rand sau despartite cu ; , comentariu cu #, eticheta cu nume:
+       SET Ra, n    MOV ADD SUB MUL MOD LT EQ Ra, Rb    INC DEC Ra    LD Ra, Rb (Ra := celula Rb)   ST Ra, Rb (celula Rb := Ra)
+       JMP x   JZ JNZ Ra, x  (x = eticheta sau registru; cu eticheta se foloseste R6)
+       CAMP Ra (campul)   ASTEAPTA (doarme pana se schimba ceva oriunde in tor)   BAZA Ra (inceputul turei tale)
+       TRIMITE Ra, Rb (Ra catre slotul Rb)   PRIMESTE Ra, Rb (valoarea, de la cine)   VECIN Ra (urmatorul proces cu acelasi program, in inel)
+       NOTA Ra, Rb (nota Ra din Z7, octava Rb)   SCRIE Ra (in shell)   DORMI Ra (ms)   CEDEAZA   STOP   NOP *)
+  IMPORT Strings, Sunet, Tor7, CFS := CubicumFS;
+
+  CONST NP* = 7; NQ = 16; NI = 40; NS = 260; NE = 40; NO = 28; NK* = 16;
+    Liber* = 0; Activ* = 1; Simte* = 2; Primeste* = 3; Doarme* = 4;
+    Felie = 64;   (* cate instructiuni ruleaza un proces pana ii vine randul urmatorului *)
+
+  TYPE Proc = RECORD
+      nume: ARRAY 24 OF CHAR;
+      pid, stare, pc, lung, vazut, trezire, ultimNota, pasi, pasiSec, cpu: INTEGER;
+      r: ARRAY 7 OF INTEGER;
+      qv, qs: ARRAY NQ OF INTEGER; nq: INTEGER
+    END;
+
+  VAR p: ARRAY NP OF Proc; urmPid, sesiune, rr, secDe, totalSec, trimise: INTEGER;
+    ies: ARRAY NI OF ARRAY 72 OF CHAR; nies: INTEGER;
+    pkF, pkT: ARRAY NK OF INTEGER;
+    mn: ARRAY NO OF ARRAY 10 OF CHAR; fel: ARRAY NO OF INTEGER;
+    z7: ARRAY 7 OF REAL;
+    (* asamblorul *)
+    sOp, sA, sB, sImm, sMar, sAdr: ARRAY NS OF INTEGER; sLab: ARRAY NS OF ARRAY 16 OF CHAR; ns: INTEGER;
+    eNume: ARRAY NE OF ARRAY 16 OF CHAR; eSt: ARRAY NE OF INTEGER; ne: INTEGER;
+
+  (* ---------- iesirile pentru shell ---------- *)
+
+  PROCEDURE Spune(s: ARRAY OF CHAR);
+    VAR i: INTEGER;
+  BEGIN
+    IF nies = NI THEN FOR i := 0 TO NI - 2 DO ies[i] := ies[i + 1] END; DEC(nies) END;
+    Strings.Copy(s, ies[nies]); INC(nies)
+  END Spune;
+
+  PROCEDURE NrIesiri*(): INTEGER;
+  BEGIN RETURN nies
+  END NrIesiri;
+
+  PROCEDURE Iesire*(k: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN IF (k >= 0) & (k < nies) THEN Strings.Copy(ies[k], s) ELSE s := "" END
+  END Iesire;
+
+  PROCEDURE Goleste*;
+  BEGIN nies := 0
+  END Goleste;
+
+  PROCEDURE Cade(s: INTEGER; ce: ARRAY OF CHAR);   (* eroare la rulare: procesul moare, eroarea ramane in Ash *)
+    VAR m: ARRAY 96 OF CHAR;
+  BEGIN
+    Strings.Copy(p[s].nume, m); Strings.Append(": ", m); Strings.Append(ce, m); CFS.Cenusa(m);
+    m := "["; Strings.Append(p[s].nume, m); Strings.Append("] căzut: ", m); Strings.Append(ce, m); Spune(m);
+    p[s].stare := Liber
+  END Cade;
+
+  (* ---------- asamblorul ---------- *)
+
+  PROCEDURE Registru(w: ARRAY OF CHAR): INTEGER;   (* R0..R6 -> 0..6, altfel -1 *)
+    VAR r: INTEGER;
+  BEGIN
+    r := -1;
+    IF ((w[0] = "R") OR (w[0] = "r")) & (w[1] >= "0") & (w[1] <= "6") & (w[2] = 0X) THEN r := ORD(w[1]) - ORD("0") END;
+    RETURN r
+  END Registru;
+
+  PROCEDURE Numar(w: ARRAY OF CHAR): INTEGER;   (* numar zecimal >= 0, altfel -1 *)
+    VAR i, n: INTEGER;
+  BEGIN
+    n := 0; i := 0;
+    IF w[0] = 0X THEN n := -1 END;
+    WHILE (n >= 0) & (i < LEN(w)) & (w[i] # 0X) DO
+      IF (w[i] >= "0") & (w[i] <= "9") & (n < 100000000) THEN n := n * 10 + ORD(w[i]) - ORD("0") ELSE n := -1 END;
+      INC(i)
+    END;
+    RETURN n
+  END Numar;
+
+  PROCEDURE Cifre(n: INTEGER): INTEGER;   (* cate cifre in baza 7 *)
+    VAR c: INTEGER;
+  BEGIN c := 1; WHILE n >= 7 DO n := n DIV 7; INC(c) END; RETURN c
+  END Cifre;
+
+  PROCEDURE Pune(baza, k, op, a, b: INTEGER);
+  BEGIN
+    k := baza + k * 4;
+    Tor7.Scrie(k, op DIV 7); Tor7.Scrie(k + 1, op MOD 7); Tor7.Scrie(k + 2, a); Tor7.Scrie(k + 3, b)
+  END Pune;
+
+  PROCEDURE PuneNr(baza: INTEGER; VAR k: INTEGER; r, n, c: INTEGER);   (* Ra := n, in c instructiuni: SET + DIG-uri *)
+    VAR d: ARRAY 12 OF INTEGER; j: INTEGER;
+  BEGIN
+    FOR j := 0 TO c - 1 DO d[j] := n MOD 7; n := n DIV 7 END;
+    Pune(baza, k, 1, r, d[c - 1]); INC(k);
+    FOR j := c - 2 TO 0 BY -1 DO Pune(baza, k, 2, r, d[j]); INC(k) END
+  END PuneNr;
+
+  PROCEDURE Greseala(nume: ARRAY OF CHAR; st: INTEGER; ce, cu: ARRAY OF CHAR);
+    VAR m: ARRAY 96 OF CHAR;
+  BEGIN
+    Strings.Copy(nume, m); Strings.Append(" instr. ", m); Strings.AppendInt(st + 1, 0, m); Strings.Append(": ", m);
+    Strings.Append(ce, m); Strings.Append(" ", m); Strings.Append(cu, m);
+    CFS.Cenusa(m);
+    Spune(m)
+  END Greseala;
+
+  PROCEDURE Instr(nume: ARRAY OF CHAR; VAR tk: ARRAY OF ARRAY OF CHAR; nt: INTEGER): BOOLEAN;   (* o instructiune in sOp.. *)
+    VAR op, f, a, b, k: INTEGER; ok: BOOLEAN; w: ARRAY 24 OF CHAR;
+  BEGIN
+    ok := TRUE; Strings.Copy(tk[0], w); Strings.Cap(w);
+    op := -1; k := 0;
+    WHILE (op < 0) & (k < NO) DO IF mn[k] = w THEN op := k END; INC(k) END;
+    IF op < 0 THEN Greseala(nume, ns, "instrucțiune necunoscută", tk[0]); ok := FALSE
+    ELSE
+      f := fel[op]; a := 0; b := 0; sLab[ns] := ""; sImm[ns] := -1; sMar[ns] := 1;
+      IF (f = 0) & (nt # 1) OR (f = 1) & (nt # 2) OR (f = 5) & (nt # 2) OR (f IN {2, 3, 4, 6}) & (nt # 3) THEN
+        Greseala(nume, ns, "număr greșit de operanzi la", tk[0]); ok := FALSE
+      ELSIF f = 0 THEN
+      ELSIF f = 5 THEN   (* JMP x *)
+        a := Registru(tk[1]);
+        IF a < 0 THEN Strings.Copy(tk[1], sLab[ns]); a := 6; sMar[ns] := 6 END
+      ELSE
+        a := Registru(tk[1]);
+        IF a < 0 THEN Greseala(nume, ns, "aștept un registru R0..R6, nu", tk[1]); ok := FALSE
+        ELSIF f = 2 THEN b := Registru(tk[2]); IF b < 0 THEN Greseala(nume, ns, "aștept un registru R0..R6, nu", tk[2]); ok := FALSE END
+        ELSIF f = 3 THEN b := Numar(tk[2]); IF (b < 0) OR (b > 6) THEN Greseala(nume, ns, "DIG vrea o cifră 0..6, nu", tk[2]); ok := FALSE END
+        ELSIF f = 4 THEN   (* SET Ra, n sau SET Ra, eticheta *)
+          b := Numar(tk[2]);
+          IF b >= 0 THEN sImm[ns] := b; sMar[ns] := Cifre(b) ELSE Strings.Copy(tk[2], sLab[ns]); sMar[ns] := 5 END
+        ELSIF f = 6 THEN   (* JZ / JNZ Ra, x *)
+          b := Registru(tk[2]);
+          IF b < 0 THEN Strings.Copy(tk[2], sLab[ns]); b := 6; sMar[ns] := 6 END
+        END
+      END;
+      IF ok THEN sOp[ns] := op; sA[ns] := a; sB[ns] := b; INC(ns) END
+    END;
+    RETURN ok
+  END Instr;
+
+  PROCEDURE Asambleaza(VAR t: ARRAY OF CHAR; nume: ARRAY OF CHAR; baza: INTEGER): INTEGER;   (* nr. de instructiuni, -1 = greseala *)
+    VAR i, j, k, nt, n, adr, e: INTEGER; ok, com: BOOLEAN; st: ARRAY 160 OF CHAR; tk: ARRAY 5 OF ARRAY 24 OF CHAR;
+      w: ARRAY 24 OF CHAR; ch: CHAR;
+  BEGIN
+    ns := 0; ne := 0; ok := TRUE; i := 0;
+    (* 1. bucata cu bucata: etichete si instructiuni *)
+    WHILE ok & (i < LEN(t)) & (t[i] # 0X) DO
+      j := 0; com := FALSE;
+      WHILE (i < LEN(t)) & (t[i] # 0X) & (t[i] # ";") & (t[i] # 0AX) & (t[i] # 0DX) DO
+        IF t[i] = "#" THEN com := TRUE END;
+        IF ~com & (j < LEN(st) - 1) THEN st[j] := t[i]; INC(j) END;
+        INC(i)
+      END;
+      st[j] := 0X;
+      IF (i < LEN(t)) & (t[i] # 0X) THEN INC(i) END;
+      nt := 0; j := 0;
+      WHILE ok & (st[j] # 0X) DO
+        ch := st[j];
+        IF (ch = " ") OR (ch = ",") OR (ch = 9X) OR (ch = ":") THEN INC(j)
+        ELSE
+          k := 0;
+          WHILE (st[j] # 0X) & (st[j] # " ") & (st[j] # ",") & (st[j] # 9X) & (st[j] # ":") DO
+            IF k < LEN(w) - 1 THEN w[k] := st[j]; INC(k) END; INC(j)
+          END;
+          w[k] := 0X;
+          IF st[j] = ":" THEN
+            IF ne < NE THEN Strings.Copy(w, eNume[ne]); eSt[ne] := ns; INC(ne) END
+          ELSIF nt < 4 THEN Strings.Copy(w, tk[nt]); INC(nt)
+          ELSE Greseala(nume, ns, "prea mulți operanzi după", tk[0]); ok := FALSE
+          END
+        END
+      END;
+      IF ok & (nt > 0) THEN
+        IF ns >= NS THEN Greseala(nume, ns, "program prea lung", ""); ok := FALSE ELSE ok := Instr(nume, tk, nt) END
+      END
+    END;
+    (* 2. adresele *)
+    adr := 0;
+    FOR k := 0 TO ns - 1 DO sAdr[k] := adr; adr := adr + sMar[k] END;
+    n := adr;
+    IF n * 4 > Tor7.Tura THEN Greseala(nume, ns, "nu încape într-o tură a spiralei", ""); ok := FALSE END;
+    (* 3. scrierea in tor *)
+    k := 0; i := 0;
+    WHILE ok & (i < ns) DO
+      IF sLab[i] # "" THEN
+        e := -1; j := 0;
+        WHILE (e < 0) & (j < ne) DO IF eNume[j] = sLab[i] THEN e := j END; INC(j) END;
+        IF e < 0 THEN Greseala(nume, i, "nu există eticheta", sLab[i]); ok := FALSE
+        ELSE
+          IF eSt[e] < ns THEN adr := sAdr[eSt[e]] ELSE adr := n END;
+          IF fel[sOp[i]] = 4 THEN PuneNr(baza, k, sA[i], adr, 5)
+          ELSE PuneNr(baza, k, 6, adr, 5); Pune(baza, k, sOp[i], sA[i], sB[i]); INC(k)
+          END
+        END
+      ELSIF sImm[i] >= 0 THEN PuneNr(baza, k, sA[i], sImm[i], sMar[i])
+      ELSE Pune(baza, k, sOp[i], sA[i], sB[i]); INC(k)
+      END;
+      INC(i)
+    END;
+    IF ~ok THEN n := -1 END;
+    RETURN n
+  END Asambleaza;
+
+  (* ---------- procesele ---------- *)
+
+  PROCEDURE Vecin(s: INTEGER): INTEGER;   (* urmatorul proces viu din inel, cu acelasi program; el insusi daca e singur *)
+    VAR k, r, t: INTEGER;
+  BEGIN
+    r := s; k := 1;
+    WHILE (r = s) & (k < NP) DO
+      t := (s + k) MOD NP;
+      IF (p[t].stare # Liber) & (p[t].nume = p[s].nume) THEN r := t END;
+      INC(k)
+    END;
+    RETURN r
+  END Vecin;
+
+  PROCEDURE Trimite(s, t, v: INTEGER);
+  BEGIN
+    pkF[trimise MOD NK] := s; pkT[trimise MOD NK] := t; INC(trimise);
+    IF (p[t].stare # Liber) & (p[t].nq < NQ) THEN p[t].qv[p[t].nq] := v; p[t].qs[p[t].nq] := s; INC(p[t].nq) END
+  END Trimite;
+
+  PROCEDURE Posta*(t, v: INTEGER);   (* un mesaj din afara (de la interfata) catre tura t *)
+  BEGIN IF (t >= 0) & (t < NP) & (p[t].stare # Liber) & (p[t].nq < NQ) THEN p[t].qv[p[t].nq] := v; p[t].qs[p[t].nq] := t; INC(p[t].nq) END
+  END Posta;
+
+  PROCEDURE Hz(a, b: INTEGER): INTEGER;
+    VAR k, m: INTEGER;
+  BEGIN
+    m := 1; FOR k := 1 TO b MOD 3 DO m := m * 2 END;
+    RETURN FLOOR(z7[a MOD 7] * FLT(m) + 0.5)
+  END Hz;
+
+  PROCEDURE Pas(s, acum: INTEGER): BOOLEAN;   (* o instructiune; FALSE = felia procesului s se termina aici *)
+    VAR op, a, b, k, va, vb: INTEGER; cont: BOOLEAN; m: ARRAY 72 OF CHAR;
+  BEGIN
+    cont := TRUE;
+    IF (p[s].pc < 0) OR (p[s].pc >= p[s].lung) THEN Cade(s, "a ieșit din program"); cont := FALSE
+    ELSE
+      k := s * Tor7.Tura + p[s].pc * 4;
+      op := Tor7.Citeste(k) * 7 + Tor7.Citeste(k + 1); a := Tor7.Citeste(k + 2); b := Tor7.Citeste(k + 3);
+      INC(p[s].pc); INC(p[s].pasi); INC(p[s].pasiSec); INC(totalSec);
+      va := p[s].r[a]; vb := p[s].r[b];
+      IF op = 0 THEN
+      ELSIF op = 1 THEN p[s].r[a] := b
+      ELSIF op = 2 THEN p[s].r[a] := va * 7 + b
+      ELSIF op = 3 THEN p[s].r[a] := vb
+      ELSIF op = 4 THEN p[s].r[a] := va + vb
+      ELSIF op = 5 THEN p[s].r[a] := va - vb
+      ELSIF op = 6 THEN p[s].r[a] := va * vb
+      ELSIF op = 7 THEN IF vb = 0 THEN Cade(s, "MOD cu 0"); cont := FALSE ELSE p[s].r[a] := va MOD vb END
+      ELSIF op = 8 THEN p[s].r[a] := va + 1
+      ELSIF op = 9 THEN p[s].r[a] := va - 1
+      ELSIF op = 10 THEN p[s].r[a] := Tor7.Citeste(vb)
+      ELSIF op = 11 THEN Tor7.Scrie(vb, va); cont := FALSE   (* dupa o scriere randul trece mai departe: structura o simte acum *)
+      ELSIF op = 12 THEN p[s].pc := va
+      ELSIF op = 13 THEN IF va = 0 THEN p[s].pc := vb END
+      ELSIF op = 14 THEN IF va # 0 THEN p[s].pc := vb END
+      ELSIF op = 15 THEN IF va < vb THEN p[s].r[a] := 1 ELSE p[s].r[a] := 0 END
+      ELSIF op = 16 THEN IF va = vb THEN p[s].r[a] := 1 ELSE p[s].r[a] := 0 END
+      ELSIF op = 17 THEN p[s].r[a] := Tor7.Camp(); p[s].vazut := Tor7.Scrieri()
+      ELSIF op = 18 THEN
+        IF Tor7.Scrieri() > p[s].vazut THEN p[s].vazut := Tor7.Scrieri()
+        ELSE DEC(p[s].pc); p[s].stare := Simte; cont := FALSE
+        END
+      ELSIF op = 19 THEN Trimite(s, vb MOD NP, va)
+      ELSIF op = 20 THEN
+        IF p[s].nq > 0 THEN
+          p[s].r[a] := p[s].qv[0]; p[s].r[b] := p[s].qs[0];
+          FOR k := 0 TO p[s].nq - 2 DO p[s].qv[k] := p[s].qv[k + 1]; p[s].qs[k] := p[s].qs[k + 1] END;
+          DEC(p[s].nq)
+        ELSE DEC(p[s].pc); p[s].stare := Primeste; cont := FALSE
+        END
+      ELSIF op = 21 THEN
+        IF acum >= p[s].ultimNota + 120 THEN Sunet.Nota(Hz(va, vb), 400, 30); p[s].ultimNota := acum
+        ELSE DEC(p[s].pc); p[s].stare := Doarme; p[s].trezire := p[s].ultimNota + 120; cont := FALSE
+        END
+      ELSIF op = 22 THEN m := "["; Strings.Append(p[s].nume, m); Strings.Append("] ", m); Strings.AppendInt(va, 0, m); Spune(m)
+      ELSIF op = 23 THEN cont := FALSE
+      ELSIF op = 24 THEN
+        m := "["; Strings.Append(p[s].nume, m); Strings.Append("] s-a oprit", m); Spune(m);
+        p[s].stare := Liber; cont := FALSE
+      ELSIF op = 25 THEN p[s].r[a] := s * Tor7.Tura
+      ELSIF op = 26 THEN p[s].r[a] := Vecin(s)
+      ELSIF op = 27 THEN IF va > 0 THEN p[s].trezire := acum + va; p[s].stare := Doarme; cont := FALSE END
+      ELSE m := "instrucțiune necunoscută în tor: "; Strings.AppendInt(op, 0, m); Cade(s, m); cont := FALSE
+      END
+    END;
+    RETURN cont
+  END Pas;
+
+  PROCEDURE Trezeste(acum: INTEGER);   (* cine doarme, simte campul sau asteapta un mesaj si are de ce, se trezeste *)
+    VAR s, st: INTEGER;
+  BEGIN
+    FOR s := 0 TO NP - 1 DO
+      st := p[s].stare;
+      IF (st = Doarme) & (acum >= p[s].trezire) OR (st = Simte) & (Tor7.Scrieri() > p[s].vazut) OR (st = Primeste) & (p[s].nq > 0) THEN
+        p[s].stare := Activ
+      END
+    END
+  END Trezeste;
+
+  PROCEDURE Ruleaza*(buget: INTEGER);   (* o bucata de timp: cel mult buget instructiuni, impartite pe rand *)
+    VAR acum, s, k, n: INTEGER; a, cont: BOOLEAN;
+  BEGIN
+    acum := Sunet.Ms();
+    IF acum - secDe >= 1000 THEN   (* CPU% = instructiunile fiecaruia din ultima secunda *)
+      FOR s := 0 TO NP - 1 DO
+        IF totalSec > 0 THEN p[s].cpu := (p[s].pasiSec * 200 + totalSec) DIV (2 * totalSec) ELSE p[s].cpu := 0 END;
+        p[s].pasiSec := 0
+      END;
+      totalSec := 0; secDe := acum
+    END;
+    REPEAT
+      a := FALSE;
+      FOR k := 0 TO NP - 1 DO
+        s := (rr + k) MOD NP;
+        Trezeste(acum);
+        IF (p[s].stare = Activ) & (buget > 0) THEN
+          n := 0; cont := TRUE;
+          WHILE cont & (n < Felie) & (buget > 0) & (p[s].stare = Activ) DO cont := Pas(s, acum); INC(n); DEC(buget) END;
+          a := TRUE
+        END
+      END
+    UNTIL ~a OR (buget <= 0);
+    rr := (rr + 1) MOD NP
+  END Ruleaza;
+
+  PROCEDURE Porneste*(nume: ARRAY OF CHAR): INTEGER;   (* programul nume.z7 din Cubicum FS intra intr-un slot liber *)
+    VAR s, i, n, k: INTEGER; t: ARRAY CFS.LC OF CHAR; m: ARRAY 72 OF CHAR;
+  BEGIN
+    s := -1; k := 0;
+    WHILE (s < 0) & (k < NP) DO IF p[k].stare = Liber THEN s := k END; INC(k) END;
+    i := CFS.Gaseste(nume);
+    IF s < 0 THEN Spune("nucleul: toate cele 7 ture ale spiralei sunt ocupate")
+    ELSIF i < 0 THEN m := "nucleul: nu găsesc "; Strings.Append(nume, m); Spune(m); s := -1
+    ELSE
+      CFS.Continut(i, t);
+      n := Asambleaza(t, nume, s * Tor7.Tura);
+      IF n < 0 THEN s := -1
+      ELSE
+        Strings.Copy(nume, p[s].nume);
+        k := Strings.Pos(".", p[s].nume, 0); IF k > 0 THEN p[s].nume[k] := 0X END;
+        p[s].pid := urmPid; INC(urmPid);
+        p[s].pc := 0; p[s].lung := n; p[s].nq := 0; p[s].pasi := 0; p[s].pasiSec := 0; p[s].cpu := 0;
+        p[s].ultimNota := -1000; p[s].trezire := 0; p[s].vazut := Tor7.Scrieri();
+        FOR k := 0 TO 6 DO p[s].r[k] := 0 END;
+        p[s].stare := Activ;
+        m := "["; Strings.Append(p[s].nume, m); Strings.Append("] pornit pe tura ", m); Strings.AppendInt(s, 0, m);
+        Strings.Append(" a spiralei · pid ", m); Strings.AppendInt(p[s].pid, 0, m); Spune(m)
+      END
+    END;
+    RETURN s
+  END Porneste;
+
+  PROCEDURE Opreste*(s: INTEGER);
+    VAR m: ARRAY 72 OF CHAR;
+  BEGIN
+    IF (s >= 0) & (s < NP) & (p[s].stare # Liber) THEN
+      m := "["; Strings.Append(p[s].nume, m); Strings.Append("] oprit", m); Spune(m);
+      p[s].stare := Liber
+    END
+  END Opreste;
+
+  PROCEDURE Arde*;   (* Burn: procesele si torul ard; raman Ash si Cubicum FS *)
+    VAR s: INTEGER; m: ARRAY 72 OF CHAR;
+  BEGIN
+    FOR s := 0 TO NP - 1 DO p[s].stare := Liber; p[s].nq := 0; p[s].cpu := 0 END;
+    Tor7.Arde;
+    m := "∿ Burn: sesiunea "; Strings.AppendInt(sesiune, 0, m); Strings.Append(" a ars · rămân Ash și Cubicum FS", m); Spune(m);
+    INC(sesiune)
+  END Arde;
+
+  (* ---------- ce vede interfata ---------- *)
+
+  PROCEDURE Stare*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].stare
+  END Stare;
+
+  PROCEDURE NumeStare*(st: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN
+    IF st = Activ THEN s := "rulează" ELSIF st = Simte THEN s := "simte câmpul" ELSIF st = Primeste THEN s := "primește"
+    ELSIF st = Doarme THEN s := "doarme" ELSE s := "liber"
+    END
+  END NumeStare;
+
+  PROCEDURE Nume*(s: INTEGER; VAR n: ARRAY OF CHAR);
+  BEGIN IF p[s MOD NP].stare = Liber THEN n := "" ELSE Strings.Copy(p[s MOD NP].nume, n) END
+  END Nume;
+
+  PROCEDURE Pid*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].pid
+  END Pid;
+
+  PROCEDURE Cpu*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].cpu
+  END Cpu;
+
+  PROCEDURE Pasi*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].pasi
+  END Pasi;
+
+  PROCEDURE Lung*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].lung
+  END Lung;
+
+  PROCEDURE Pc*(s: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].pc
+  END Pc;
+
+  PROCEDURE Reg*(s, k: INTEGER): INTEGER;
+  BEGIN RETURN p[s MOD NP].r[k MOD 7]
+  END Reg;
+
+  PROCEDURE Vii*(): INTEGER;
+    VAR s, n: INTEGER;
+  BEGIN n := 0; FOR s := 0 TO NP - 1 DO IF p[s].stare # Liber THEN INC(n) END END; RETURN n
+  END Vii;
+
+  PROCEDURE Sesiune*(): INTEGER;
+  BEGIN RETURN sesiune
+  END Sesiune;
+
+  PROCEDURE Trimise*(): INTEGER;   (* cate mesaje s-au trimis de la pornire *)
+  BEGIN RETURN trimise
+  END Trimise;
+
+  PROCEDURE Pachet*(k: INTEGER; VAR de, la: INTEGER);   (* mesajul numarul k (din ultimele NK) *)
+  BEGIN de := pkF[k MOD NK]; la := pkT[k MOD NK]
+  END Pachet;
+
+  PROCEDURE Mn(k: INTEGER; s: ARRAY OF CHAR; f: INTEGER);
+  BEGIN Strings.Copy(s, mn[k]); fel[k] := f
+  END Mn;
+
+BEGIN
+  z7[0] := 196.0; z7[1] := 220.0; z7[2] := 246.94; z7[3] := 261.63; z7[4] := 293.66; z7[5] := 329.63; z7[6] := 369.99;
+  (* fel: 0 fara operanzi, 1 Ra, 2 Ra Rb, 3 Ra cifra, 4 SET, 5 salt, 6 salt conditionat *)
+  Mn(0, "NOP", 0); Mn(1, "SET", 4); Mn(2, "DIG", 3); Mn(3, "MOV", 2); Mn(4, "ADD", 2); Mn(5, "SUB", 2); Mn(6, "MUL", 2);
+  Mn(7, "MOD", 2); Mn(8, "INC", 1); Mn(9, "DEC", 1); Mn(10, "LD", 2); Mn(11, "ST", 2); Mn(12, "JMP", 5); Mn(13, "JZ", 6);
+  Mn(14, "JNZ", 6); Mn(15, "LT", 2); Mn(16, "EQ", 2); Mn(17, "CAMP", 1); Mn(18, "ASTEAPTA", 0); Mn(19, "TRIMITE", 2);
+  Mn(20, "PRIMESTE", 2); Mn(21, "NOTA", 2); Mn(22, "SCRIE", 1); Mn(23, "CEDEAZA", 0); Mn(24, "STOP", 0); Mn(25, "BAZA", 1);
+  Mn(26, "VECIN", 1); Mn(27, "DORMI", 1);
+  urmPid := 2; sesiune := 1; rr := 0; secDe := 0; totalSec := 0; trimise := 0; nies := 0;
+  FOR rr := 0 TO NP - 1 DO p[rr].stare := Liber; p[rr].pid := 0 END;
+  rr := 0
+END Salamandra.
+
+MODULE CubicumOS;  (* Cubicum OS v1.0 adus din HTML in Oberon, cu Cubicum FS inauntru. O faci cu:  apk CubicumOS.Mod "Cubicum OS"
+     Boot in 5 faze, desktop izometric, 7 ferestre (Procese, Retea, Alchimist, Shell, VM, Orga CRDA, Trilogia) si a opta,
+     Cubicum FS: fisierele stau in cubul Z7^3, la adresa data de nume, tip si zi. Pe telefon e loc de o fereastra:
+     ea ocupa ecranul, iar bara de jos le schimba. *)
+  IMPORT Math, Strings, Os, Ecran, Sunet, CFS := CubicumFS, Tor7, Sal := Salamandra;
+
+  CONST Av = 62;   (* pasul literei: 0.62 din marime, ca un font monospatiat (in HTML: Share Tech Mono) *)
+    NS = 120; NP = 24; NL = 48; LL = 100; NF = 8; LT = 256; LC = CFS.LC;
+
+  VAR
+    dp: REAL; G1: INTEGER;
+    W, H, t0, acum, ultimCadru, dt: INTEGER;
+    faza, fazaSunata: INTEGER; booted: BOOLEAN;
+    seed: INTEGER;
+    z7: ARRAY 7 OF REAL;
+    fazaTxt, fazaSub: ARRAY 5 OF ARRAY 40 OF CHAR; fazaT, fazaBar: ARRAY 5 OF INTEGER;
+    cBg2, cGold, cGold2, cCyan, cGreen, cPurple, cRed, cDim, cText, cWin, cBord, cBordF, cTitlu, cYel: INTEGER;
+    sx, sy, sr, sa, sda, sdx: ARRAY NS OF REAL;
+    barH, tbY, wx, wy, ww, wh, titH, bx, by, bw, bh, clip0, clip1: INTEGER;
+    cur: INTEGER;                                     (* fereastra deschisa; -1 = desktopul gol *)
+    icon, titlu, scurt: ARRAY NF OF ARRAY 32 OF CHAR;
+    era: BOOLEAN; jx, jy, ultimY, mutat: INTEGER;    (* atingerea *)
+    scroll, inalt: ARRAY NF OF INTEGER;
+    ceasS: ARRAY 12 OF CHAR; ceasT: INTEGER;
+    (* procese *)
+    procSel, salDe, undaDe, scrVazute: INTEGER;
+    (* retea *)
+    pkF, pkT, pkC: ARRAY NP OF INTEGER; pkU: ARRAY NP OF REAL; npk, vazTrimise: INTEGER;
+    (* alchimist *)
+    asym, anume: ARRAY 8 OF ARRAY 24 OF CHAR; adesc: ARRAY 8 OF ARRAY 48 OF CHAR;
+    instEu, instDe: INTEGER;
+    (* shell *)
+    sl: ARRAY NL OF ARRAY LL OF CHAR; slc: ARRAY NL OF INTEGER; nsl: INTEGER;
+    cmd: ARRAY 10 OF ARRAY 8 OF CHAR; ultimaCmd: ARRAY 8 OF CHAR;
+    (* vm *)
+    vmSel: INTEGER;
+    (* orga *)
+    on: ARRAY 343 OF BOOLEAN; arp: BOOLEAN; arpI, ultimArp: INTEGER;
+    oCx, oCy, oBtnY: INTEGER; oSt: REAL;
+    mesaj: ARRAY 80 OF CHAR; mesajPana: INTEGER;
+    obt: ARRAY 5 OF ARRAY 16 OF CHAR;
+    (* trilogia *)
+    trN, trT, trB, trZ: ARRAY 4 OF ARRAY LT OF CHAR;
+    (* cubicum fs *)
+    sel, vede, ardeDe: INTEGER;
+    cCx, cCy, lY0, lY1, rowH: INTEGER; cSt: REAL;
+
+  (* ---------- unelte ---------- *)
+
+  PROCEDURE D(v: INTEGER): INTEGER;   (* dp -> pixeli *)
+  BEGIN RETURN FLOOR(FLT(v) * dp + 0.5)
+  END D;
+
+  PROCEDURE Min(a, b: INTEGER): INTEGER;
+  BEGIN IF b < a THEN a := b END; RETURN a
+  END Min;
+
+  PROCEDURE Rnd(n: INTEGER): INTEGER;
+  BEGIN seed := seed * 69069 + 1; RETURN (seed DIV 65536) MOD n
+  END Rnd;
+
+  PROCEDURE RndR(): REAL;
+  BEGIN RETURN FLT(Rnd(10000)) / 10000.0
+  END RndR;
+
+  PROCEDURE Am(r, g, b: INTEGER; a: REAL): INTEGER;   (* culoarea (r,g,b) cu opacitatea a, peste fundalul inchis *)
+  BEGIN
+    IF a < 0.0 THEN a := 0.0 ELSIF a > 1.0 THEN a := 1.0 END;
+    RETURN Ecran.RGB(10 + FLOOR(FLT(r - 10) * a), 10 + FLOOR(FLT(g - 10) * a), 16 + FLOOR(FLT(b - 16) * a))
+  END Am;
+
+  PROCEDURE Lat(s: ARRAY OF CHAR; m: INTEGER): INTEGER;   (* latimea aproximativa a textului *)
+  BEGIN RETURN Strings.Length(s) * m * Av DIV 100
+  END Lat;
+
+  PROCEDURE Vede(y, m: INTEGER): BOOLEAN;
+  BEGIN RETURN (y - m >= clip0) & (y <= clip1)
+  END Vede;
+
+  PROCEDURE T(x, y, m: INTEGER; s: ARRAY OF CHAR);   (* text aliniat la stanga, litera cu litera pe pasi egali *)
+    VAR i, a: INTEGER; c: ARRAY 2 OF CHAR;
+  BEGIN
+    IF Vede(y, m) THEN
+      a := m * Av; i := 0; c[1] := 0X;
+      WHILE (i < LEN(s)) & (s[i] # 0X) DO
+        IF s[i] # " " THEN c[0] := s[i]; Ecran.Text(x + (i * a + a DIV 2) DIV 100, y, m, c) END;
+        INC(i)
+      END
+    END
+  END T;
+
+  PROCEDURE TC(x, y, m: INTEGER; s: ARRAY OF CHAR);  (* centrat *)
+  BEGIN IF Vede(y, m) THEN Ecran.Text(x, y, m, s) END
+  END TC;
+
+  PROCEDURE TD(x, y, m: INTEGER; s: ARRAY OF CHAR);  (* aliniat la dreapta *)
+  BEGIN T(x - Lat(s, m), y, m, s)
+  END TD;
+
+  PROCEDURE Contur(x, y, w, h: INTEGER);
+  BEGIN
+    Ecran.Linie(x, y, x + w, y); Ecran.Linie(x + w, y, x + w, y + h);
+    Ecran.Linie(x + w, y + h, x, y + h); Ecran.Linie(x, y + h, x, y)
+  END Contur;
+
+  PROCEDURE Buton(x, y, w, h: INTEGER; s: ARRAY OF CHAR; fond, scris, chenar: INTEGER);
+    VAR m: INTEGER;
+  BEGIN
+    Ecran.Culoare(fond); Ecran.Dreptunghi(x, y, w, h);
+    Ecran.Culoare(chenar); Ecran.Grosime(G1); Contur(x, y, w, h);
+    m := D(12);
+    IF Strings.Length(s) * m * 56 DIV 100 > w - D(6) THEN m := (w - D(6)) * 100 DIV (Strings.Length(s) * 56) END;
+    Ecran.Culoare(scris); TC(x + w DIV 2, y + h DIV 2 + m DIV 3, m, s)
+  END Buton;
+
+  PROCEDURE In(x, y, x0, y0, w, h: INTEGER): BOOLEAN;
+  BEGIN RETURN (x >= x0) & (x < x0 + w) & (y >= y0) & (y < y0 + h)
+  END In;
+
+  PROCEDURE Paragraf(x, y, m, lat: INTEGER; s: ARRAY OF CHAR): INTEGER;   (* scrie s pe randuri; intoarce y-ul ultimului rand *)
+    VAR maxc, n, start, k, j: INTEGER; r: ARRAY LL OF CHAR; nou: BOOLEAN;
+  BEGIN
+    maxc := lat * 100 DIV (m * Av);
+    IF maxc < 8 THEN maxc := 8 ELSIF maxc > LL - 1 THEN maxc := LL - 1 END;
+    n := Strings.Length(s); start := 0;
+    WHILE start < n DO
+      j := start; WHILE (j < n) & (j < start + maxc) & (s[j] # 0AX) DO INC(j) END;
+      nou := (j < n) & (s[j] = 0AX);
+      IF nou OR (j >= n) THEN k := j - start
+      ELSE
+        k := maxc;
+        WHILE (k > 0) & (s[start + k] # " ") DO DEC(k) END;
+        IF k = 0 THEN k := maxc END
+      END;
+      Strings.Extract(s, start, k, r);
+      y := y + m * 13 DIV 10; T(x, y, m, r);
+      start := start + k;
+      IF nou THEN INC(start) ELSE WHILE (start < n) & (s[start] = " ") DO INC(start) END END
+    END;
+    RETURN y
+  END Paragraf;
+
+  PROCEDURE Elipsa(cx, cy: INTEGER; rx, ry: REAL; plin: BOOLEAN);
+    VAR i, x0, y0, x1, y1: INTEGER; a: REAL;
+  BEGIN
+    x0 := cx + FLOOR(rx + 0.5); y0 := cy;
+    FOR i := 1 TO 48 DO
+      a := FLT(i) * 2.0 * Math.pi / 48.0;
+      x1 := cx + FLOOR(rx * Math.cos(a) + 0.5); y1 := cy + FLOOR(ry * Math.sin(a) + 0.5);
+      IF plin THEN Ecran.Triunghi(cx, cy, x0, y0, x1, y1) ELSE Ecran.Linie(x0, y0, x1, y1) END;
+      x0 := x1; y0 := y1
+    END
+  END Elipsa;
+
+  PROCEDURE CubIso(cx, cy, s, ct, cl, cr, cm: INTEGER);   (* cubul izometric: fata de sus, stanga, dreapta, muchiile *)
+    VAR h, v: INTEGER;
+  BEGIN
+    h := s * 577 DIV 1000; v := s * 11 DIV 10;
+    Ecran.Culoare(ct); Ecran.Triunghi(cx, cy - h, cx + s, cy, cx, cy + h); Ecran.Triunghi(cx, cy - h, cx, cy + h, cx - s, cy);
+    Ecran.Culoare(cl); Ecran.Triunghi(cx - s, cy, cx, cy + h, cx, cy + h + v); Ecran.Triunghi(cx - s, cy, cx, cy + h + v, cx - s, cy + v);
+    Ecran.Culoare(cr); Ecran.Triunghi(cx, cy + h, cx + s, cy, cx + s, cy + v); Ecran.Triunghi(cx, cy + h, cx + s, cy + v, cx, cy + h + v);
+    Ecran.Culoare(cm); Ecran.Grosime(G1);
+    Ecran.Linie(cx, cy - h, cx + s, cy); Ecran.Linie(cx + s, cy, cx, cy + h);
+    Ecran.Linie(cx, cy + h, cx - s, cy); Ecran.Linie(cx - s, cy, cx, cy - h);
+    Ecran.Linie(cx - s, cy, cx - s, cy + v); Ecran.Linie(cx, cy + h, cx, cy + h + v); Ecran.Linie(cx + s, cy, cx + s, cy + v);
+    Ecran.Linie(cx - s, cy + v, cx, cy + h + v); Ecran.Linie(cx, cy + h + v, cx + s, cy + v)
+  END CubIso;
+
+  (* proiectia izometrica a celulei (x, y, z), ca in orga CRDA din HTML *)
+  PROCEDURE Proiect(x, y, z, cx, cy: INTEGER; st: REAL; VAR px, py: INTEGER);
+  BEGIN
+    px := cx + FLOOR(FLT(x - y) * st) + (z - 3) * D(2);
+    py := cy + FLOOR(FLT(x + y) * st * 0.577 * 0.5) - FLOOR(FLT(z) * st * 0.577 * 0.9)
+  END Proiect;
+
+  (* ---------- ceasul (ora Romaniei: UTC+2, vara UTC+3) ---------- *)
+
+  PROCEDURE Bisect(a: INTEGER): BOOLEAN;
+  BEGIN RETURN (a MOD 4 = 0) & ((a MOD 100 # 0) OR (a MOD 400 = 0))
+  END Bisect;
+
+  PROCEDURE ZileLuna(a, l: INTEGER): INTEGER;
+    VAR r: INTEGER;
+  BEGIN
+    IF l = 2 THEN IF Bisect(a) THEN r := 29 ELSE r := 28 END
+    ELSIF (l = 4) OR (l = 6) OR (l = 9) OR (l = 11) THEN r := 30
+    ELSE r := 31
+    END;
+    RETURN r
+  END ZileLuna;
+
+  PROCEDURE Zile(a, l, z: INTEGER): INTEGER;   (* zile de la 1 ian 2010 *)
+    VAR n, i: INTEGER;
+  BEGIN
+    n := 0;
+    FOR i := 2010 TO a - 1 DO IF Bisect(i) THEN n := n + 366 ELSE n := n + 365 END END;
+    FOR i := 1 TO l - 1 DO n := n + ZileLuna(a, i) END;
+    RETURN n + z - 1
+  END Zile;
+
+  PROCEDURE UltimaDuminica(a, l: INTEGER): INTEGER;   (* 1 ian 2010 a fost vineri *)
+    VAR d: INTEGER;
+  BEGIN d := Zile(a, l, 31); RETURN d - (d + 5) MOD 7
+  END UltimaDuminica;
+
+  PROCEDURE Doi(v: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN IF v < 10 THEN Strings.Append("0", s) END; Strings.AppendInt(v, 0, s)
+  END Doi;
+
+  PROCEDURE Ceas;
+    VAR t, a, sec: INTEGER;
+  BEGIN
+    t := Os.CurrentTime();
+    IF t # ceasT THEN
+      ceasT := t; a := 2010;
+      WHILE t DIV 86400 >= Zile(a + 1, 1, 1) DO INC(a) END;
+      IF (t >= UltimaDuminica(a, 3) * 86400 + 3600) & (t < UltimaDuminica(a, 10) * 86400 + 3600) THEN t := t + 3 * 3600
+      ELSE t := t + 2 * 3600
+      END;
+      sec := t MOD 86400;
+      ceasS := ""; Doi(sec DIV 3600, ceasS); Strings.Append(":", ceasS); Doi(sec DIV 60 MOD 60, ceasS);
+      Strings.Append(":", ceasS); Doi(sec MOD 60, ceasS)
+    END
+  END Ceas;
+
+  (* ---------- asezarea pe ecran ---------- *)
+
+  PROCEDURE Asaza;
+    VAR ah, top: INTEGER;
+  BEGIN
+    W := Ecran.Latime(); H := Ecran.Inaltime(); clip0 := 0; clip1 := H;
+    dp := FLT(Ecran.Densitate()) / 100.0; IF dp < 1.0 THEN dp := 1.0 END;
+    G1 := D(1); IF G1 < 1 THEN G1 := 1 END;
+    barH := D(30); tbY := H - D(96);
+    wx := D(6); wy := barH + D(6); ww := W - 2 * wx; wh := tbY - D(6) - wy; titH := D(34);
+    bx := wx + D(10); by := wy + titH + D(8); bw := ww - D(20); bh := wh - titH - D(16);
+    (* orga: nodurile deasupra, butoanele jos *)
+    oBtnY := by + bh - D(36) - D(22);
+    top := by; ah := oBtnY - D(8) - top;
+    oSt := FLT(bw - D(16)) / 12.5;
+    IF FLT(ah) / 7.0 < oSt THEN oSt := FLT(ah) / 7.0 END;
+    oCx := bx + bw DIV 2; oCy := top + ah DIV 2 - FLOOR(0.17 * oSt);
+    (* cubicum fs: cubul sus, lista dedesubt *)
+    ah := bh * 38 DIV 100;
+    cSt := FLT(bw - D(60)) / 12.5;
+    IF FLT(ah - D(24)) / 7.0 < cSt THEN cSt := FLT(ah - D(24)) / 7.0 END;
+    cCx := bx + bw DIV 2; cCy := by + ah DIV 2 - FLOOR(0.17 * cSt) + D(4);
+    lY0 := by + ah + D(44); lY1 := by + bh - D(46); rowH := D(36)
+  END Asaza;
+
+  PROCEDURE TbBtn(i: INTEGER; VAR x, y, w, h: INTEGER);   (* butoanele barei de jos: 2 randuri de cate 4 *)
+    VAR g: INTEGER;
+  BEGIN
+    g := D(6); w := (W - 5 * g) DIV 4; h := D(38);
+    x := g + (i MOD 4) * (w + g); y := tbY + D(8) + (i DIV 4) * (h + g)
+  END TbBtn;
+
+  (* ---------- shell: randurile ---------- *)
+
+  PROCEDURE Rand1(col: INTEGER; s: ARRAY OF CHAR);
+    VAR i: INTEGER;
+  BEGIN
+    IF nsl = NL THEN
+      FOR i := 0 TO NL - 2 DO sl[i] := sl[i + 1]; slc[i] := slc[i + 1] END;
+      DEC(nsl)
+    END;
+    Strings.Copy(s, sl[nsl]); slc[nsl] := col; INC(nsl)
+  END Rand1;
+
+  PROCEDURE Rand(col: INTEGER; s: ARRAY OF CHAR);   (* un rand de shell, impartit ca sa incapa pe latime *)
+    VAR maxc, n, start, k: INTEGER; r: ARRAY LL OF CHAR;
+  BEGIN
+    maxc := bw * 100 DIV (D(12) * Av);
+    IF maxc < 10 THEN maxc := 10 ELSIF maxc > LL - 1 THEN maxc := LL - 1 END;
+    n := Strings.Length(s); start := 0;
+    IF n = 0 THEN Rand1(col, "") END;
+    WHILE start < n DO
+      IF n - start <= maxc THEN k := n - start
+      ELSE
+        k := maxc;
+        WHILE (k > 0) & (s[start + k] # " ") DO DEC(k) END;
+        IF k = 0 THEN k := maxc END
+      END;
+      Strings.Extract(s, start, k, r); Rand1(col, r);
+      start := start + k;
+      WHILE (start < n) & (s[start] = " ") DO INC(start) END
+    END
+  END Rand;
+
+  (* ---------- orga ---------- *)
+
+  PROCEDURE NodP(i: INTEGER; VAR px, py: INTEGER);
+  BEGIN Proiect(i MOD 7, i DIV 7 MOD 7, i DIV 49, oCx, oCy, oSt, px, py)
+  END NodP;
+
+  PROCEDURE Hz(i: INTEGER): INTEGER;   (* frecventa nodului: nota x din Z7, octava z MOD 3 *)
+    VAR k, m: INTEGER;
+  BEGIN
+    m := 1; FOR k := 1 TO i DIV 49 MOD 3 DO m := m * 2 END;
+    RETURN FLOOR(z7[i MOD 7] * FLT(m) + 0.5)
+  END Hz;
+
+  PROCEDURE Aprinse(): INTEGER;
+    VAR i, n: INTEGER;
+  BEGIN n := 0; FOR i := 0 TO 342 DO IF on[i] THEN INC(n) END END; RETURN n
+  END Aprinse;
+
+  PROCEDURE Acord;   (* toate nodurile aprinse deodata (cel mult 16, cat duce sintetizatorul) *)
+    VAR i, k: INTEGER;
+  BEGIN
+    k := 0;
+    FOR i := 0 TO 342 DO IF on[i] & (k < 16) THEN Sunet.Nota(Hz(i), 600, 28); INC(k) END END
+  END Acord;
+
+  PROCEDURE Mesaj(s: ARRAY OF CHAR);
+  BEGIN Strings.Copy(s, mesaj); mesajPana := acum + 2500
+  END Mesaj;
+
+  PROCEDURE SalveazaAcord;   (* acordul din orga devine fisier in Cubicum FS: acord-N.crda *)
+    VAR i, k: INTEGER; nume: ARRAY 32 OF CHAR; c: ARRAY LC OF CHAR; s: ARRAY 80 OF CHAR;
+  BEGIN
+    IF Aprinse() = 0 THEN Mesaj("nimic aprins · atinge noduri întâi")
+    ELSE
+      k := 1;
+      REPEAT nume := "acord-"; Strings.AppendInt(k, 0, nume); Strings.Append(".crda", nume); INC(k)
+      UNTIL CFS.Gaseste(nume) < 0;
+      c := "";
+      FOR i := 0 TO 342 DO
+        IF on[i] & (Strings.Length(c) < LC - 6) THEN
+          IF c # "" THEN Strings.Append(" ", c) END;
+          Strings.AppendInt(i, 0, c)
+        END
+      END;
+      k := CFS.Scrie(nume, c);
+      IF k >= 0 THEN
+        s := "salvat: "; Strings.Append(nume, s); Strings.Append(" → cfs://", s);
+        CFS.AdresaText(k, nume); Strings.Append(nume, s); Mesaj(s);
+        Sunet.Nota(370, 200, 35)
+      ELSE Mesaj("n-a mers · vezi ash în shell")
+      END
+    END
+  END SalveazaAcord;
+
+  PROCEDURE IncarcaAcord(c: ARRAY OF CHAR);   (* "12 57 300" -> nodurile aprinse *)
+    VAR i, v: INTEGER; cifre: BOOLEAN;
+  BEGIN
+    FOR i := 0 TO 342 DO on[i] := FALSE END;
+    arp := FALSE; v := 0; cifre := FALSE; i := 0;
+    WHILE (i < LEN(c)) & (c[i] # 0X) DO
+      IF (c[i] >= "0") & (c[i] <= "9") THEN v := v * 10 + ORD(c[i]) - ORD("0"); cifre := TRUE
+      ELSE IF cifre & (v < 343) THEN on[v] := TRUE END; v := 0; cifre := FALSE
+      END;
+      INC(i)
+    END;
+    IF cifre & (v < 343) THEN on[v] := TRUE END
+  END IncarcaAcord;
+
+  (* ---------- procesele si alchimistul ---------- *)
+
+
+  PROCEDURE NumePkg(i: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN Strings.Copy(anume[i], s); Strings.Append(".pkg", s)
+  END NumePkg;
+
+  PROCEDURE StareAlch(i: INTEGER): INTEGER;   (* 0 disponibil, 1 se instaleaza, 2 instalat (= fisier in Cubicum FS) *)
+    VAR s: ARRAY 32 OF CHAR; r: INTEGER;
+  BEGIN
+    NumePkg(i, s);
+    IF instEu = i THEN r := 1 ELSIF CFS.Gaseste(s) >= 0 THEN r := 2 ELSE r := 0 END;
+    RETURN r
+  END StareAlch;
+
+  (* ---------- comenzile shell-ului ---------- *)
+
+  PROCEDURE Exec(k: INTEGER);
+    VAR i, j, x, y, z: INTEGER; s: ARRAY LL OF CHAR; t: ARRAY LL OF CHAR; cnt: ARRAY 8 OF INTEGER;
+  BEGIN
+    Strings.Copy(cmd[k], ultimaCmd); scroll[3] := 0;
+    s := "Z₇ > "; Strings.Append(cmd[k], s); Rand(Am(200, 169, 110, 0.6), s);
+    Sunet.Nota(220, 60, 18);
+    IF k = 0 THEN
+      Rand(cCyan, "CUBICUM OS Shell Z₇ · comenzi disponibile:");
+      Rand(cGold, "  z7 · ls · ps · ash · cube · cfs · ver · who · clear")
+    ELSIF k = 1 THEN Rand(cGold, "CUBICUM OS v1.1 · Salamandra + Tor7 (7⁷ celule) · Oberon")
+    ELSIF k = 2 THEN Rand(cCyan, "jahbalon@cubicum · mason solomonar · pictor")
+    ELSIF k = 3 THEN
+      Rand(cGold, "Cubicum FS · fără căi: 8 rădăcini, colțurile cubului");
+      FOR j := 0 TO 7 DO cnt[j] := 0 END;
+      FOR i := 0 TO CFS.N() - 1 DO INC(cnt[CFS.Radacina(i)]) END;
+      FOR j := 0 TO 3 DO
+        s := "◢ "; CFS.NumeRadacina(2 * j, t); Strings.Append(t, s); Strings.Append(" : ", s);
+        Strings.AppendInt(cnt[2 * j], 0, s); Strings.Append("      ◢ ", s);
+        CFS.NumeRadacina(2 * j + 1, t); Strings.Append(t, s); Strings.Append(" : ", s); Strings.AppendInt(cnt[2 * j + 1], 0, s);
+        Rand(cText, s)
+      END
+    ELSIF k = 4 THEN
+      Rand(cGold, "    1 salamandra   (nucleul, Oul)");
+      FOR i := 0 TO Sal.NP - 1 DO
+        IF Sal.Stare(i) # Sal.Liber THEN
+          s := ""; Strings.AppendInt(Sal.Pid(i), 5, s); Strings.Append(" ", s); Sal.Nume(i, t); Strings.Append(t, s);
+          Strings.Append("   tura ", s); Strings.AppendInt(i, 0, s); Strings.Append(" · ", s); Sal.NumeStare(Sal.Stare(i), t);
+          Strings.Append(t, s); Strings.Append(" · ", s); Strings.AppendInt(Sal.Cpu(i), 0, s); Strings.Append("%", s);
+          Rand(cGreen, s)
+        END
+      END;
+      IF Sal.Vii() = 0 THEN Rand(cText, "  niciun program pornit · pornește unul din Process") END
+    ELSIF k = 5 THEN
+      IF CFS.NrAsh() = 0 THEN Rand(cGold, "ASH · erori conservate · ∅ erori noi · Salamandra veghează")
+      ELSE
+        s := "ASH · "; Strings.AppendInt(CFS.NrAsh(), 0, s); Strings.Append(" erori conservate · Salamandra veghează", s);
+        Rand(cGold, s);
+        FOR i := 0 TO CFS.NrAsh() - 1 DO CFS.Ash(i, t); s := "  "; Strings.Append(t, s); Rand(cRed, s) END
+      END
+    ELSIF k = 6 THEN
+      Rand(cGold, "CUBICUM THEOREM:"); Rand(cCyan, "  în spațiul toroidal Z₇,");
+      Rand(cCyan, "  cel mai scurt drum între două puncte"); Rand(cGold, "  descrie un CUB. □")
+    ELSIF k = 7 THEN Rand(cCyan, "Z₇ = {0,1,2,3,4,5,6} · ciclic · toroidal · pur")
+    ELSIF k = 8 THEN
+      s := "Cubicum FS · "; Strings.AppendInt(CFS.N(), 0, s); Strings.Append(" fișiere în 7³ = 343 celule", s); Rand(cGold, s);
+      FOR i := 0 TO CFS.N() - 1 DO
+        CFS.Adresa(i, x, y, z); s := "  "; Strings.AppendInt(x, 0, s); Strings.Append(".", s); Strings.AppendInt(y, 0, s);
+        Strings.Append(".", s); Strings.AppendInt(z, 0, s); Strings.Append("  ", s); CFS.Nume(i, t); Strings.Append(t, s);
+        Rand(cText, s)
+      END
+    ELSIF k = 9 THEN nsl := 0; Rand(cGold, "· cleared ·")
+    END
+  END Exec;
+
+  (* ---------- boot ---------- *)
+
+  PROCEDURE Boot(e: INTEGER);
+    VAR cx, cy, y0, i, x, y, xp, yp, xa, ya, s, lb, f, k: INTEGER; a, r, ang, p, u: REAL;
+  BEGIN
+    Ecran.Fond(Ecran.RGB(0, 0, 0));
+    cx := W DIV 2; cy := H DIV 2; y0 := cy - D(80);
+    a := FLT(e) * 0.0012;   (* bootAnim din HTML: +0.02 pe cadru, 60 de cadre pe secunda *)
+    faza := 0; WHILE (faza < 4) & (e >= fazaT[faza + 1]) DO INC(faza) END;
+    IF faza > fazaSunata THEN fazaSunata := faza; Sunet.Nota(FLOOR(z7[faza] * 0.5 + 0.5), 400, 35) END;
+    IF faza = 0 THEN   (* vidul: trei puncte *)
+      FOR i := 0 TO 2 DO
+        x := cx + FLOOR(Math.sin(a * 0.7 + FLT(i) * 2.1) * FLT(D(60)));
+        y := y0 + FLOOR(Math.cos(a * 0.5 + FLT(i)) * FLT(D(30)));
+        Ecran.Culoare(Am(200, 169, 110, 0.25 + Math.sin(a + FLT(i)) * 0.15)); Ecran.Disc(x, y, D(2))
+      END
+    ELSIF faza = 1 THEN   (* oul auriu care pulseaza, apoi crapa *)
+      r := FLT(D(40)) + Math.sin(a * 2.0) * FLT(D(4));
+      Ecran.Culoare(Am(200, 169, 110, 0.12)); Elipsa(cx, y0, r, r * 1.4, TRUE);
+      Ecran.Culoare(Am(220, 185, 126, 0.25)); Elipsa(cx, y0, r * 0.6, r * 0.84, TRUE);
+      Ecran.Culoare(Am(232, 201, 142, 0.42)); Elipsa(cx, y0, r * 0.25, r * 0.35, TRUE);
+      Ecran.Culoare(Am(200, 169, 110, 0.5 + Math.sin(a) * 0.3)); Ecran.Grosime(Min(D(2), 3)); Elipsa(cx, y0, r, r * 1.4, FALSE);
+      IF e > 1600 THEN
+        Ecran.Culoare(Am(0, 212, 255, 0.5)); Ecran.Grosime(G1);
+        Ecran.Linie(cx, y0 - D(30), cx + D(8), y0 - D(10)); Ecran.Linie(cx + D(8), y0 - D(10), cx - D(3), y0 + D(10))
+      END
+    ELSIF faza = 2 THEN   (* salamandra: corp sinusoidal, cap, ochi *)
+      Ecran.Culoare(Am(57, 255, 20, 0.8)); Ecran.Grosime(D(2));
+      xa := 0; ya := 0;
+      FOR k := 0 TO 60 DO
+        xp := cx - D(60) + D(2 * k);
+        yp := y0 + FLOOR(Math.sin(FLT(2 * k) / 120.0 * Math.pi * 3.0 + a * 4.0) * FLT(D(20)));
+        IF k > 0 THEN Ecran.Linie(xa, ya, xp, yp) END;
+        xa := xp; ya := yp
+      END;
+      y := y0 + FLOOR(Math.sin(a * 4.0) * FLT(D(20)));
+      Ecran.Culoare(Am(57, 255, 20, 0.9)); Ecran.Disc(cx - D(60), y, D(5));
+      Ecran.Culoare(Ecran.RGB(255, 255, 255)); Ecran.Disc(cx - D(64), y - D(2), Min(D(2), 2) + 1)
+    ELSE   (* cubul se naste, cu un inel de 7 stele *)
+      p := 20.0 + a * 1.5; IF (p > 45.0) OR (faza = 4) THEN p := 45.0 END;
+      s := FLOOR(p * dp);
+      u := 0.2 + Math.sin(a) * 0.1;
+      CubIso(cx, cy - D(60), s, Am(200, 169, 110, u), Am(100, 80, 40, 0.35), Am(60, 50, 20, 0.4), Am(200, 169, 110, 0.6));
+      IF faza = 3 THEN
+        FOR i := 0 TO 6 DO
+          ang := FLT(i) / 7.0 * Math.pi * 2.0 + a * 0.5;
+          x := cx + FLOOR(Math.cos(ang) * FLT(D(80))); y := cy - D(60) + FLOOR(Math.sin(ang) * FLT(D(40)));
+          Ecran.Culoare(Am(200, 169, 110, 0.35 + Math.sin(a * 2.0 + FLT(i)) * 0.3)); Ecran.Disc(x, y, D(2))
+        END
+      END
+    END;
+    (* textul fazei care pulseaza, sub-titlul si bara *)
+    Ecran.Culoare(Am(200, 169, 110, 0.8 + 0.2 * Math.cos(FLT(e) / 1000.0 * 2.0 * Math.pi)));
+    TC(cx, cy + D(30), D(30), fazaTxt[faza]);
+    Ecran.Culoare(Am(0, 212, 255, 0.7)); TC(cx, cy + D(62), D(14), fazaSub[faza]);
+    lb := Min(D(300), W - D(40));
+    Ecran.Culoare(Ecran.RGB(58, 58, 92)); Ecran.Dreptunghi(cx - lb DIV 2, cy + D(88), lb, D(3));
+    f := fazaBar[faza];
+    IF faza > 0 THEN   (* tranzitia de 0.3 s din CSS *)
+      u := FLT(e - fazaT[faza]) / 300.0; IF u > 1.0 THEN u := 1.0 END;
+      f := fazaBar[faza - 1] + FLOOR(FLT(fazaBar[faza] - fazaBar[faza - 1]) * u)
+    END;
+    f := lb * f DIV 100;
+    FOR k := 0 TO 9 DO   (* degradeul auriu -> cyan, in 10 felii *)
+      u := FLT(k) / 9.0;
+      Ecran.Culoare(Ecran.RGB(200 - FLOOR(200.0 * u), 169 + FLOOR(43.0 * u), 110 + FLOOR(145.0 * u)));
+      x := lb * k DIV 10; IF x < f THEN Ecran.Dreptunghi(cx - lb DIV 2 + x, cy + D(88), Min(lb DIV 10 + 1, f - x), D(3)) END
+    END
+  END Boot;
+
+  (* ---------- desktopul ---------- *)
+
+  PROCEDURE PunStele;
+    VAR i: INTEGER;
+  BEGIN
+    FOR i := 0 TO NS - 1 DO
+      sx[i] := RndR() * FLT(W); sy[i] := RndR() * FLT(tbY);
+      sr[i] := RndR() * 1.2 + 0.3; sa[i] := RndR();
+      sda[i] := (RndR() - 0.5) * 0.005; sdx[i] := (RndR() - 0.5) * 0.08
+    END
+  END PunStele;
+
+  PROCEDURE Fundal(e: INTEGER);
+    VAR k, S, h, off, x, r, i: INTEGER; L, f: REAL;
+  BEGIN
+    Ecran.Fond(Ecran.RGB(7, 7, 16));
+    FOR k := 5 TO 1 BY -1 DO   (* degradeul radial, in inele *)
+      f := (FLT(k) - 0.5) / 5.0;
+      Ecran.Culoare(Ecran.RGB(15 - FLOOR(8.0 * f), 15 - FLOOR(8.0 * f), 30 - FLOOR(14.0 * f)));
+      Ecran.Disc(W DIV 2, H DIV 2, H * k DIV 5)
+    END;
+    (* grila izometrica: romburile sunt doua familii de linii paralele *)
+    S := D(36); h := FLOOR(FLT(S) * 0.577); IF h < 1 THEN h := 1 END;
+    off := FLOOR(FLT(e) * 0.00009 * dp) MOD (2 * S);
+    L := FLT(H) * FLT(S) / FLT(h);
+    f := 1.0 - FLT(acum - undaDe) / 400.0; IF f < 0.0 THEN f := 0.0 END;   (* o scriere oriunde in tor: toata grila o simte *)
+    Ecran.Culoare(Am(200, 169, 110, 0.08 + 0.12 * f)); Ecran.Grosime(G1);
+    x := off + S - (FLOOR(L) DIV (2 * S) + 2) * 2 * S;
+    WHILE x <= W + FLOOR(L) DO
+      IF (x <= W) & (x + FLOOR(L) >= 0) THEN Ecran.Linie(x, 0, x + FLOOR(L), H) END;
+      IF (x >= 0) & (x - FLOOR(L) <= W) THEN Ecran.Linie(x, 0, x - FLOOR(L), H) END;
+      x := x + 2 * S
+    END;
+    (* stelele *)
+    f := FLT(dt) / 16.7;
+    FOR i := 0 TO NS - 1 DO
+      sa[i] := sa[i] + sda[i] * f;
+      IF sa[i] < 0.0 THEN sda[i] := ABS(sda[i]) END;
+      IF sa[i] > 1.0 THEN sda[i] := -ABS(sda[i]) END;
+      sx[i] := sx[i] + sdx[i] * f * dp;
+      IF sx[i] < 0.0 THEN sx[i] := FLT(W) ELSIF sx[i] > FLT(W) THEN sx[i] := 0.0 END;
+      Ecran.Culoare(Am(200, 169, 110, sa[i] * 0.8));
+      r := FLOOR(sr[i] * dp + 0.5); IF r < 1 THEN r := 1 END;
+      Ecran.Disc(FLOOR(sx[i]), FLOOR(sy[i]), r)
+    END;
+    (* cubul stins din fundal *)
+    k := Min(W, H) * 18 DIV 100;
+    CubIso(W - k * 3 DIV 2, H * 3 DIV 10, k, Am(200, 169, 110, 0.06), Am(100, 80, 40, 0.1), Am(60, 50, 20, 0.12), Am(200, 169, 110, 0.1))
+  END Fundal;
+
+  PROCEDURE BaraSus;
+    VAR u: REAL;
+  BEGIN
+    Ecran.Culoare(cWin); Ecran.Dreptunghi(0, 0, W, barH);
+    Ecran.Culoare(cBord); Ecran.Grosime(G1); Ecran.Linie(0, barH, W, barH);
+    Ecran.Culoare(cGold); T(D(10), barH DIV 2 + D(5), D(13), "⬡ CUBICUM OS");
+    u := 0.6 + 0.4 * Math.sin(FLT(acum) / 900.0);
+    IF acum - salDe < 3000 THEN Ecran.Culoare(cRed); TC(W DIV 2 + D(20), barH DIV 2 + D(6), D(14), "∿ BURN?")
+    ELSE Ecran.Culoare(Am(200, 169, 110, u)); TC(W DIV 2 + D(20), barH DIV 2 + D(6), D(16), "∿ SAL")
+    END;
+    Ceas; Ecran.Culoare(cGold2); TD(W - D(10), barH DIV 2 + D(6), D(15), ceasS)
+  END BaraSus;
+
+  PROCEDURE BaraJos;
+    VAR i, x, y, w, h: INTEGER; s: ARRAY 48 OF CHAR;
+  BEGIN
+    Ecran.Culoare(cWin); Ecran.Dreptunghi(0, tbY - D(6), W, H - tbY + D(6));
+    Ecran.Culoare(cBord); Ecran.Grosime(G1); Ecran.Linie(0, tbY, W, tbY);
+    FOR i := 0 TO NF - 1 DO
+      TbBtn(i, x, y, w, h);
+      s := ""; Strings.Append(icon[i], s); Strings.Append(" ", s); Strings.Append(scurt[i], s);
+      IF i = cur THEN Buton(x, y, w, h, s, Am(0, 212, 255, 0.15), cCyan, cCyan)
+      ELSE Buton(x, y, w, h, s, Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.25))
+      END
+    END
+  END BaraJos;
+
+  PROCEDURE CorpFereastra;
+  BEGIN Ecran.Culoare(cWin); Ecran.Dreptunghi(wx, wy, ww, wh)
+  END CorpFereastra;
+
+  PROCEDURE TitluFereastra;
+    VAR s: ARRAY 64 OF CHAR; cy: INTEGER;
+  BEGIN
+    Ecran.Culoare(cWin); Ecran.Dreptunghi(wx, wy, ww, titH);
+    Ecran.Culoare(cTitlu); Ecran.Dreptunghi(wx, wy, ww, titH);
+    Ecran.Culoare(cBord); Ecran.Grosime(G1); Ecran.Linie(wx, wy + titH, wx + ww, wy + titH);
+    s := ""; Strings.Append(icon[cur], s); Strings.Append("  ", s); Strings.Append(titlu[cur], s);
+    Ecran.Culoare(cGold); T(wx + D(12), wy + titH DIV 2 + D(5), D(15), s);
+    cy := wy + titH DIV 2;
+    Ecran.Culoare(Ecran.RGB(251, 191, 36)); Ecran.Disc(wx + ww - D(48), cy, D(8));
+    Ecran.Culoare(Ecran.RGB(239, 68, 68)); Ecran.Disc(wx + ww - D(20), cy, D(8));
+    Ecran.Culoare(Ecran.RGB(0, 0, 0)); TC(wx + ww - D(48), cy + D(4), D(11), "─");
+    Ecran.Culoare(Ecran.RGB(255, 255, 255)); TC(wx + ww - D(20), cy + D(4), D(11), "✕");
+    Ecran.Culoare(cBordF); Contur(wx, wy, ww, wh)
+  END TitluFereastra;
+
+  (* ---------- ferestrele ---------- *)
+
+  PROCEDURE ProcRand(i: INTEGER): INTEGER;   (* y-ul de sus al randului turei i *)
+  BEGIN RETURN by + D(62) + i * D(30)
+  END ProcRand;
+
+  PROCEDURE ProcB(k: INTEGER; VAR x, y, w, h: INTEGER);   (* OPRESTE si BURN *)
+  BEGIN w := (bw - D(8)) DIV 2; h := D(36); x := bx + k * (w + D(8)); y := ProcRand(7) + D(8)
+  END ProcB;
+
+  PROCEDURE ProgB(k: INTEGER; VAR x, y, w, h: INTEGER);   (* programele din cub, cate 2 pe rand *)
+  BEGIN w := (bw - D(8)) DIV 2; h := D(34); x := bx + (k MOD 2) * (w + D(8)); y := ProcRand(7) + D(76) + (k DIV 2) * (h + D(6))
+  END ProgB;
+
+  PROCEDURE Progs(VAR idx: ARRAY OF INTEGER): INTEGER;   (* fisierele .z7 din Cubicum FS, cel mult 8 *)
+    VAR i, n: INTEGER; s: ARRAY 32 OF CHAR;
+  BEGIN
+    n := 0;
+    FOR i := 0 TO CFS.N() - 1 DO CFS.Nume(i, s); IF (CFS.Tip(s) = 4) & (n < 8) THEN idx[n] := i; INC(n) END END;
+    RETURN n
+  END Progs;
+
+  PROCEDURE Procese;
+    VAR i, y, yb, x1, x2, x3, st, n, x, w, h: INTEGER; s, t: ARRAY 64 OF CHAR; idx: ARRAY 8 OF INTEGER;
+  BEGIN
+    s := "∿ salamandra (pid 1) · sesiunea "; Strings.AppendInt(Sal.Sesiune(), 0, s);
+    Strings.Append(" · câmp ", s); Strings.AppendInt(Tor7.Camp(), 0, s);
+    Ecran.Culoare(cGold); T(bx, by + D(14), D(12), s);
+    s := "procesor = memorie = torul Z₇⁷ · scrieri: "; Strings.AppendInt(Tor7.Scrieri(), 0, s);
+    Ecran.Culoare(Ecran.RGB(90, 90, 130)); T(bx, by + D(31), D(10), s);
+    x1 := bx + bw * 47 DIV 100; x2 := bx + bw * 58 DIV 100; x3 := bx + bw;
+    y := by + D(54);
+    Ecran.Culoare(cGold); T(bx, y, D(10), "TURA"); T(bx + D(42), y, D(10), "PROCES"); T(x1, y, D(10), "PID");
+    T(x2, y, D(10), "STARE"); TD(x3, y, D(10), "CPU%");
+    Ecran.Culoare(Ecran.RGB(58, 58, 92)); Ecran.Grosime(G1); Ecran.Linie(bx, y + D(6), x3, y + D(6));
+    FOR i := 0 TO Sal.NP - 1 DO
+      y := ProcRand(i); yb := y + D(21); st := Sal.Stare(i);
+      IF i = procSel THEN Ecran.Culoare(Am(0, 212, 255, 0.12)); Ecran.Dreptunghi(bx, y + D(3), bw, D(27)) END;
+      s := ""; Strings.AppendInt(i, 0, s); Ecran.Culoare(Am(200, 169, 110, 0.6)); T(bx + D(10), yb, D(12), s);
+      IF st = Sal.Liber THEN Ecran.Culoare(Ecran.RGB(58, 58, 92)); T(bx + D(42), yb, D(12), "· liber")
+      ELSE
+        Sal.Nume(i, s); Ecran.Culoare(cCyan); T(bx + D(42), yb, D(12), s);
+        s := ""; Strings.AppendInt(Sal.Pid(i), 0, s); Ecran.Culoare(Am(200, 200, 232, 0.6)); T(x1, yb, D(12), s);
+        IF st = Sal.Activ THEN Ecran.Culoare(cGreen) ELSIF st = Sal.Simte THEN Ecran.Culoare(cCyan)
+        ELSIF st = Sal.Primeste THEN Ecran.Culoare(cPurple) ELSE Ecran.Culoare(Am(200, 200, 232, 0.6))
+        END;
+        Sal.NumeStare(st, t); T(x2, yb, D(10), t);
+        s := ""; Strings.AppendInt(Sal.Cpu(i), 0, s); Ecran.Culoare(cPurple); TD(x3, yb, D(12), s)
+      END
+    END;
+    ProcB(0, x, y, w, h);
+    IF (procSel >= 0) & (Sal.Stare(procSel) # Sal.Liber) THEN Buton(x, y, w, h, "■ OPREȘTE", Am(255, 51, 102, 0.1), cRed, Am(255, 51, 102, 0.5))
+    ELSE Buton(x, y, w, h, "■ OPREȘTE", cWin, cDim, cDim)
+    END;
+    ProcB(1, x, y, w, h);
+    IF acum - salDe < 3000 THEN Buton(x, y, w, h, "∿ SIGUR? ATINGE IAR", Am(255, 51, 102, 0.3), cRed, cRed)
+    ELSE Buton(x, y, w, h, "∿ BURN", Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.3))
+    END;
+    Ecran.Culoare(Ecran.RGB(90, 90, 130)); T(bx, ProcRand(7) + D(66), D(10), "programe din Cubicum FS · atinge ca să pornești");
+    n := Progs(idx);
+    FOR i := 0 TO n - 1 DO
+      ProgB(i, x, y, w, h); CFS.Nume(idx[i], t); s := "▶ "; Strings.Append(t, s);
+      Buton(x, y, w, h, s, Am(57, 255, 20, 0.08), cGreen, Am(57, 255, 20, 0.3))
+    END;
+    IF n = 0 THEN Ecran.Culoare(cDim); T(bx, ProcRand(7) + D(96), D(11), "niciun .z7 în cub") END
+  END Procese;
+
+  PROCEDURE Retea;
+    VAR i, j, k, cx, cy, r, x, y, c: INTEGER; nx, ny: ARRAY 7 OF INTEGER; ang: REAL; activ, viu: BOOLEAN; s: ARRAY 48 OF CHAR;
+  BEGIN
+    cx := bx + bw DIV 2; cy := by + bh DIV 2 - D(10); r := Min(bw, bh) * 65 DIV 200;
+    FOR i := 0 TO 6 DO
+      ang := FLT(i) / 7.0 * Math.pi * 2.0 - Math.pi / 2.0;
+      nx[i] := cx + FLOOR(Math.cos(ang) * FLT(r)); ny[i] := cy + FLOOR(Math.sin(ang) * FLT(r))
+    END;
+    Ecran.Grosime(G1);
+    FOR i := 0 TO 5 DO
+      FOR j := i + 1 TO 6 DO
+        IF (Sal.Stare(i) # Sal.Liber) & (Sal.Stare(j) # Sal.Liber) THEN Ecran.Culoare(Am(200, 169, 110, 0.35))
+        ELSE Ecran.Culoare(Am(200, 169, 110, 0.1))
+        END;
+        Ecran.Linie(nx[i], ny[i], nx[j], ny[j])
+      END
+    END;
+    k := 0;
+    FOR i := 0 TO npk - 1 DO
+      pkU[i] := pkU[i] + 0.03 * FLT(dt) / 16.7;
+      IF pkU[i] <= 1.0 THEN pkF[k] := pkF[i]; pkT[k] := pkT[i]; pkU[k] := pkU[i]; pkC[k] := pkC[i]; INC(k) END
+    END;
+    npk := k;
+    FOR i := 0 TO npk - 1 DO
+      x := nx[pkF[i]] + FLOOR(FLT(nx[pkT[i]] - nx[pkF[i]]) * pkU[i]);
+      y := ny[pkF[i]] + FLOOR(FLT(ny[pkT[i]] - ny[pkF[i]]) * pkU[i]);
+      IF pkF[i] = pkT[i] THEN y := y - D(20) + FLOOR(FLT(D(20)) * pkU[i]) END;
+      Ecran.Culoare(pkC[i]); Ecran.Disc(x, y, D(4));
+      IF pkC[i] = cGreen THEN c := Am(57, 255, 20, 0.3) ELSE c := Am(255, 51, 102, 0.3) END;
+      Ecran.Culoare(c); Ecran.Cerc(x, y, D(7))
+    END;
+    FOR i := 0 TO 6 DO
+      activ := FALSE; viu := Sal.Stare(i) # Sal.Liber;
+      FOR k := 0 TO npk - 1 DO IF (pkF[k] = i) OR (pkT[k] = i) & (pkU[k] > 0.9) THEN activ := TRUE END END;
+      IF activ THEN Ecran.Culoare(Am(57, 255, 20, 0.3)) ELSIF viu THEN Ecran.Culoare(Am(200, 169, 110, 0.18)) ELSE Ecran.Culoare(cWin) END;
+      Ecran.Disc(nx[i], ny[i], D(18));
+      IF activ THEN Ecran.Culoare(cGreen) ELSIF viu THEN Ecran.Culoare(cGold) ELSE Ecran.Culoare(Ecran.RGB(58, 58, 92)) END;
+      Ecran.Cerc(nx[i], ny[i], D(18));
+      IF viu THEN Sal.Nume(i, s); s[4] := 0X ELSE s := "·" END;
+      TC(nx[i], ny[i] + D(4), D(10), s);
+      s := "tura "; Strings.AppendInt(i, 0, s); Ecran.Culoare(Ecran.RGB(90, 90, 130)); TC(nx[i], ny[i] + D(32), D(9), s)
+    END;
+    s := "mesaje reale între procese: "; Strings.AppendInt(Sal.Trimise(), 0, s);
+    Ecran.Culoare(cText); TC(cx, by + bh - D(24), D(11), s);
+    Ecran.Culoare(Ecran.RGB(90, 90, 130)); TC(cx, by + bh - D(6), D(10), "verde = ajuns · roșu = tura e goală, mesajul se pierde")
+  END Retea;
+
+  PROCEDURE Alchimist;
+    VAR i, y, rh, st, xb, yb: INTEGER;
+  BEGIN
+    Ecran.Culoare(cGold); TC(bx + bw DIV 2, by + D(22), D(20), "⚗ ALCHIMIST");
+    rh := D(50); y := by + D(36);
+    FOR i := 0 TO 7 DO
+      Ecran.Culoare(Am(200, 169, 110, 0.15)); Ecran.Grosime(G1); Contur(bx, y, bw, rh - D(6));
+      Ecran.Culoare(cGold); TC(bx + D(18), y + D(29), D(20), asym[i]);
+      Ecran.Culoare(cGold2); T(bx + D(38), y + D(19), D(13), anume[i]);
+      Ecran.Culoare(Am(200, 200, 232, 0.5)); T(bx + D(38), y + D(36), D(10), adesc[i]);
+      st := StareAlch(i); xb := bx + bw - D(86); yb := y + (rh - D(6)) DIV 2 - D(10);
+      IF st = 2 THEN
+        Ecran.Culoare(Am(57, 255, 20, 0.15)); Ecran.Dreptunghi(xb, yb, D(80), D(20));
+        Ecran.Culoare(cGreen); TC(xb + D(40), yb + D(14), D(10), "INSTALAT")
+      ELSIF st = 1 THEN
+        Ecran.Culoare(cYel); TC(xb + D(40), yb + D(14), D(10), "INSTALEZ...")
+      ELSE
+        Ecran.Culoare(Am(0, 212, 255, 0.1)); Ecran.Dreptunghi(xb, yb, D(80), D(20));
+        Ecran.Culoare(cCyan); TC(xb + D(40), yb + D(14), D(10), "DISPONIBIL")
+      END;
+      y := y + rh
+    END;
+    Ecran.Culoare(Ecran.RGB(58, 58, 92)); T(bx, y + D(14), D(10), "un pachet instalat = un fișier .pkg în Cubicum FS")
+  END Alchimist;
+
+  PROCEDURE ShellB(k: INTEGER; VAR x, y, w, h: INTEGER);
+  BEGIN
+    w := (bw - 4 * D(6)) DIV 5; h := D(36);
+    x := bx + (k MOD 5) * (w + D(6)); y := by + bh - 2 * h - D(6) + (k DIV 5) * (h + D(6))
+  END ShellB;
+
+  PROCEDURE Shell;
+    VAR i, lh, k, x, y, w, h, prY, jos, viz, sc, start: INTEGER;
+  BEGIN
+    lh := D(17);
+    ShellB(0, x, y, w, h); prY := y - D(14);
+    Ecran.Culoare(Ecran.RGB(58, 58, 92)); Ecran.Grosime(G1); Ecran.Linie(bx, prY - D(22), bx + bw, prY - D(22));
+    Ecran.Culoare(cGold); T(bx, prY, D(13), "Z₇ >");
+    Ecran.Culoare(cGreen); T(bx + D(42), prY, D(12), ultimaCmd);
+    IF acum DIV 500 MOD 2 = 0 THEN T(bx + D(42) + Lat(ultimaCmd, D(12)) + D(3), prY, D(12), "▌") END;
+    jos := prY - D(30);
+    viz := (jos - by) DIV lh;
+    sc := scroll[3] DIV lh;
+    IF sc > nsl - viz THEN sc := nsl - viz END; IF sc < 0 THEN sc := 0 END;
+    scroll[3] := sc * lh;
+    start := nsl - viz - sc; IF start < 0 THEN start := 0 END;
+    i := start;
+    WHILE (i < nsl) & (i < start + viz) DO
+      Ecran.Culoare(slc[i]); T(bx, by + (i - start + 1) * lh, D(12), sl[i]); INC(i)
+    END;
+    IF sc > 0 THEN Ecran.Culoare(cDim); TD(bx + bw, by + D(12), D(10), "↓ trage în jos / sus") END;
+    FOR k := 0 TO 9 DO
+      ShellB(k, x, y, w, h); Buton(x, y, w, h, cmd[k], Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.3))
+    END
+  END Shell;
+
+  PROCEDURE VM;
+    VAR i, k, g, w, h, x, y, top, cs, gr, s, u, ul, n: INTEGER; t: ARRAY 72 OF CHAR; z: ARRAY 16 OF CHAR; d: ARRAY 7 OF INTEGER;
+  BEGIN
+    s := vmSel;
+    IF Sal.Stare(s) = Sal.Liber THEN k := 0; WHILE (k < 7) & (Sal.Stare((s + k) MOD 7) = Sal.Liber) DO INC(k) END; IF k < 7 THEN s := (s + k) MOD 7; vmSel := s END END;
+    IF Sal.Stare(s) # Sal.Liber THEN
+      Sal.Nume(s, z); t := "tura "; Strings.AppendInt(s, 0, t); Strings.Append(" · ", t); Strings.Append(z, t);
+      Strings.Append(" · pc ", t); Strings.AppendInt(Sal.Pc(s), 0, t); Strings.Append("/", t); Strings.AppendInt(Sal.Lung(s), 0, t);
+      Strings.Append(" · pași ", t); Strings.AppendInt(Sal.Pasi(s), 0, t)
+    ELSE t := "niciun proces viu · registrele sunt goale"
+    END;
+    Ecran.Culoare(cGold2); T(bx, by + D(14), D(11), t);
+    g := D(6); w := (bw - 6 * g) DIV 7; h := D(48); y := by + D(24);
+    FOR i := 0 TO 6 DO
+      x := bx + i * (w + g);
+      Ecran.Culoare(Am(139, 92, 246, 0.1)); Ecran.Dreptunghi(x, y, w, h);
+      Ecran.Culoare(Am(139, 92, 246, 0.3)); Ecran.Grosime(G1); Contur(x, y, w, h);
+      z := "R"; Strings.AppendInt(i, 0, z); Ecran.Culoare(cPurple); TC(x + w DIV 2, y + D(16), D(10), z);
+      IF Sal.Stare(s) # Sal.Liber THEN n := Sal.Reg(s, i) ELSE n := 0 END;
+      z := ""; Strings.AppendInt(n, 0, z);
+      u := D(16); IF Lat(z, u) > w - D(4) THEN u := (w - D(4)) * 100 DIV (Strings.Length(z) * 60) END;
+      Ecran.Culoare(cCyan); TC(x + w DIV 2, y + D(39), u, z)
+    END;
+    Ecran.Culoare(Ecran.RGB(90, 90, 130)); TC(bx + bw DIV 2, y + h + D(14), D(9), "atinge registrele: următorul proces");
+    (* campul si ultima scriere *)
+    y := y + h + D(42);
+    t := "câmp T = "; Strings.AppendInt(Tor7.Camp(), 0, t); Ecran.Culoare(cGreen); T(bx, y, D(17), t);
+    t := "scrieri: "; Strings.AppendInt(Tor7.Scrieri(), 0, t); Ecran.Culoare(cText); TD(bx + bw, y, D(12), t);
+    ul := Tor7.Ultima();
+    IF ul >= 0 THEN Tor7.Coord(ul, d) ELSE FOR k := 0 TO 6 DO d[k] := 0 END; d[6] := s END;
+    t := "ultima scriere: "; FOR k := 0 TO 6 DO Strings.AppendInt(d[k], 0, t); IF k < 6 THEN Strings.Append(".", t) END END;
+    IF ul >= 0 THEN Strings.Append("  (celula ", t); Strings.AppendInt(ul, 0, t); Strings.Append(")", t) END;
+    Ecran.Culoare(cGold); T(bx, y + D(22), D(11), t);
+    top := y + D(52);
+    Ecran.Culoare(Ecran.RGB(90, 90, 130)); T(bx, top - D(10), D(10), "felia d0 × d1 prin ultima scriere (d6 = tura spiralei)");
+    gr := D(4); cs := (bw - 6 * gr) DIV 7;
+    IF (by + bh - top - 6 * gr) DIV 7 < cs THEN cs := (by + bh - top - 6 * gr) DIV 7 END;
+    FOR i := 0 TO 48 DO
+      x := bx + (i MOD 7) * (cs + gr); y := top + (i DIV 7) * (cs + gr);
+      d[0] := i MOD 7; d[1] := i DIV 7; k := Tor7.Index(d);
+      z := ""; Strings.AppendInt(Tor7.Citeste(k), 0, z);
+      IF k = ul THEN
+        Ecran.Culoare(Am(57, 255, 20, 0.15)); Ecran.Dreptunghi(x, y, cs, cs);
+        Ecran.Culoare(cGreen); Contur(x, y, cs, cs); TC(x + cs DIV 2, y + cs DIV 2 + D(5), D(13), z)
+      ELSE
+        IF Tor7.Citeste(k) # 0 THEN Ecran.Culoare(Am(200, 169, 110, 0.4)) ELSE Ecran.Culoare(Am(200, 169, 110, 0.15)) END;
+        Contur(x, y, cs, cs);
+        Ecran.Culoare(cText); TC(x + cs DIV 2, y + cs DIV 2 + D(5), D(13), z)
+      END
+    END
+  END VM;
+
+  PROCEDURE OrgaB(k: INTEGER; VAR x, y, w, h: INTEGER);
+  BEGIN
+    w := (bw - 4 * D(5)) DIV 5; h := D(36);
+    x := bx + k * (w + D(5)); y := oBtnY
+  END OrgaB;
+
+  PROCEDURE Orga;
+    VAR i, x, y, w, h, z: INTEGER; s: ARRAY 80 OF CHAR;
+  BEGIN
+    FOR i := 0 TO 342 DO
+      NodP(i, x, y); z := i DIV 49;
+      IF on[i] THEN
+        Ecran.Culoare(Am(200, 169, 110, 0.22)); Ecran.Disc(x, y, D(12));
+        Ecran.Culoare(Am(200, 169, 110, 0.9)); Ecran.Disc(x, y, D(5))
+      ELSE
+        Ecran.Culoare(Am(100, 100, 160, 0.1 + FLT(z) * 0.12)); Ecran.Disc(x, y, D(3))
+      END
+    END;
+    FOR i := 0 TO 4 DO
+      OrgaB(i, x, y, w, h);
+      IF (i = 1) & arp THEN Buton(x, y, w, h, obt[i], Am(200, 169, 110, 0.3), cGold, cGold)
+      ELSE Buton(x, y, w, h, obt[i], Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.3))
+      END
+    END;
+    IF acum < mesajPana THEN Ecran.Culoare(cGreen); TC(bx + bw DIV 2, oBtnY + D(56), D(11), mesaj)
+    ELSE
+      s := "CRDA v11 · Z₇ · 343 noduri · aprinse: "; Strings.AppendInt(Aprinse(), 0, s);
+      Ecran.Culoare(cText); TC(bx + bw DIV 2, oBtnY + D(56), D(11), s)
+    END
+  END Orga;
+
+  PROCEDURE Trilogie;
+    VAR i, y: INTEGER;
+  BEGIN
+    IF scroll[6] > inalt[6] - bh THEN scroll[6] := inalt[6] - bh END;
+    IF scroll[6] < 0 THEN scroll[6] := 0 END;
+    y := by - scroll[6];
+    FOR i := 0 TO 3 DO
+      y := y + D(26); Ecran.Culoare(cGold); T(bx, y, D(22), trN[i]);
+      Ecran.Culoare(cCyan); y := Paragraf(bx, y + D(2), D(17), bw, trT[i]);
+      Ecran.Culoare(Am(200, 200, 232, 0.8)); y := Paragraf(bx, y + D(4), D(14), bw, trB[i]);
+      Ecran.Culoare(cGreen); y := Paragraf(bx, y + D(2), D(12), bw, trZ[i]);
+      y := y + D(16)
+    END;
+    inalt[6] := y + scroll[6] - by
+  END Trilogie;
+
+  PROCEDURE CfsB(k: INTEGER; VAR x, y, w, h: INTEGER);
+  BEGIN
+    w := (bw - D(8)) DIV 2; h := D(38);
+    x := bx + k * (w + D(8)); y := by + bh - h
+  END CfsB;
+
+  PROCEDURE Cfs;
+    VAR i, j, x, y, z, px, py, qx, qy, w, h, n, r: INTEGER; s, t: ARRAY 64 OF CHAR; c: ARRAY LC OF CHAR;
+  BEGIN
+    n := CFS.N();
+    IF sel >= n THEN sel := -1 END;
+    IF vede >= n THEN vede := -1 END;
+    IF vede >= 0 THEN   (* vizualizatorul unui fisier *)
+      CFS.Nume(vede, s); Ecran.Culoare(cGold2); T(bx, by + D(20), D(17), s);
+      CFS.AdresaText(vede, t); s := "cfs://"; Strings.Append(t, s); Strings.Append(" · ", s);
+      CFS.Nume(vede, t); CFS.NumeTip(CFS.Tip(t), t); Strings.Append(t, s);
+      Strings.Append(" · rădăcina ◢ ", s); CFS.NumeRadacina(CFS.Radacina(vede), t); Strings.Append(t, s);
+      Ecran.Culoare(cCyan); T(bx, by + D(42), D(11), s);
+      Ecran.Culoare(Ecran.RGB(58, 58, 92)); Ecran.Linie(bx, by + D(52), bx + bw, by + D(52));
+      CFS.Continut(vede, c); Ecran.Culoare(cText); y := Paragraf(bx, by + D(56), D(14), bw, c);
+      CFS.Nume(vede, t);
+      IF CFS.Tip(t) = 4 THEN
+        CfsB(0, x, y, w, h); Buton(x, y, w, h, "← ÎNAPOI", Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.3));
+        CfsB(1, x, y, w, h); Buton(x, y, w, h, "▶ RULEAZĂ", Am(57, 255, 20, 0.1), cGreen, Am(57, 255, 20, 0.4))
+      ELSE CfsB(0, x, y, w, h); Buton(x, y, bw, h, "← ÎNAPOI LA CUB", Am(200, 169, 110, 0.1), cGold, Am(200, 169, 110, 0.3))
+      END
+    ELSE
+      (* cubul 7x7x7: celulele stinse, muchiile, cele 8 radacini, fisierele *)
+      Ecran.Culoare(Am(100, 100, 160, 0.22));
+      FOR i := 0 TO 342 DO Proiect(i MOD 7, i DIV 7 MOD 7, i DIV 49, cCx, cCy, cSt, px, py); Ecran.Disc(px, py, G1) END;
+      Ecran.Culoare(Am(200, 169, 110, 0.35)); Ecran.Grosime(G1);
+      FOR i := 0 TO 7 DO
+        FOR j := 0 TO 2 DO
+          r := 1; IF j = 1 THEN r := 2 ELSIF j = 2 THEN r := 4 END;
+          IF i DIV r MOD 2 = 0 THEN
+            Proiect(i MOD 2 * 6, i DIV 2 MOD 2 * 6, i DIV 4 * 6, cCx, cCy, cSt, px, py);
+            Proiect((i + r) MOD 2 * 6, (i + r) DIV 2 MOD 2 * 6, (i + r) DIV 4 * 6, cCx, cCy, cSt, qx, qy);
+            Ecran.Linie(px, py, qx, qy)
+          END
+        END
+      END;
+      FOR i := 0 TO 7 DO
+        Proiect(i MOD 2 * 6, i DIV 2 MOD 2 * 6, i DIV 4 * 6, cCx, cCy, cSt, px, py);
+        Ecran.Culoare(cGold); Ecran.Disc(px, py, D(3));
+        CFS.NumeRadacina(i, s); Ecran.Culoare(Am(200, 169, 110, 0.55));
+        IF px < cCx - D(4) THEN TD(px - D(6), py + D(4), D(9), s) ELSIF px > cCx + D(4) THEN T(px + D(6), py + D(4), D(9), s)
+        ELSIF py < cCy THEN TC(px, py - D(6), D(9), s) ELSE TC(px, py + D(14), D(9), s)
+        END
+      END;
+      FOR i := 0 TO n - 1 DO
+        CFS.Adresa(i, x, y, z); Proiect(x, y, z, cCx, cCy, cSt, px, py);
+        IF i = sel THEN
+          Ecran.Culoare(cCyan); Ecran.Grosime(G1); Ecran.Cerc(px, py, D(9) + FLOOR(2.0 * Math.sin(FLT(acum) / 200.0) * dp));
+          Ecran.Disc(px, py, D(5))
+        ELSE Ecran.Culoare(cGold2); Ecran.Disc(px, py, D(4))
+        END
+      END;
+      (* informatii *)
+      s := ""; Strings.AppendInt(n, 0, s); Strings.Append(" fișiere · 7³ = 343 celule · Ash: ", s); Strings.AppendInt(CFS.NrAsh(), 0, s);
+      Ecran.Culoare(cGold); TC(bx + bw DIV 2, lY0 - D(26), D(12), s);
+      IF CFS.Scris() THEN Ecran.Culoare(Ecran.RGB(58, 58, 92)); TC(bx + bw DIV 2, lY0 - D(10), D(10), "adresa: x = numele · y = tipul · z = ziua (toate MOD 7)")
+      ELSE Ecran.Culoare(cRed); TC(bx + bw DIV 2, lY0 - D(10), D(11), "nu pot scrie cubul pe disc!")
+      END;
+      (* lista *)
+      IF scroll[7] > n * rowH - (lY1 - lY0) THEN scroll[7] := n * rowH - (lY1 - lY0) END;
+      IF scroll[7] < 0 THEN scroll[7] := 0 END;
+      FOR i := 0 TO n - 1 DO
+        y := lY0 + i * rowH - scroll[7];
+        IF (y >= lY0) & (y + rowH <= lY1 + D(2)) THEN
+          IF i = sel THEN Ecran.Culoare(Am(0, 212, 255, 0.12)); Ecran.Dreptunghi(bx, y, bw, rowH - D(4)) END;
+          Ecran.Culoare(Am(200, 169, 110, 0.15)); Ecran.Linie(bx, y + rowH - D(3), bx + bw, y + rowH - D(3));
+          CFS.Nume(i, s);
+          IF i = sel THEN Ecran.Culoare(cCyan) ELSE Ecran.Culoare(cGold2) END;
+          T(bx + D(6), y + D(15), D(13), s);
+          CFS.NumeTip(CFS.Tip(s), t); Strings.Append(" · ◢ ", t); CFS.NumeRadacina(CFS.Radacina(i), s); Strings.Append(s, t);
+          Ecran.Culoare(Am(200, 200, 232, 0.5)); T(bx + D(6), y + D(29), D(10), t);
+          CFS.AdresaText(i, t); s := "cfs://"; Strings.Append(t, s);
+          Ecran.Culoare(cCyan); TD(bx + bw - D(6), y + D(21), D(13), s)
+        END
+      END;
+      IF n = 0 THEN Ecran.Culoare(cDim); TC(bx + bw DIV 2, lY0 + D(30), D(12), "cubul e gol") END;
+      IF n * rowH > lY1 - lY0 THEN Ecran.Culoare(cDim); TD(bx + bw, lY1 + D(2), D(9), "trage lista ↕") END;
+      (* butoanele *)
+      CfsB(0, x, y, w, h);
+      IF sel >= 0 THEN Buton(x, y, w, h, "◉ DESCHIDE", Am(0, 212, 255, 0.12), cCyan, cCyan)
+      ELSE Buton(x, y, w, h, "◉ DESCHIDE", cWin, cDim, cDim)
+      END;
+      CfsB(1, x, y, w, h);
+      IF sel < 0 THEN Buton(x, y, w, h, "✕ ARDE", cWin, cDim, cDim)
+      ELSIF acum - ardeDe < 3000 THEN Buton(x, y, w, h, "✕ SIGUR? ATINGE IAR", Am(255, 51, 102, 0.3), cRed, cRed)
+      ELSE Buton(x, y, w, h, "✕ ARDE", Am(255, 51, 102, 0.1), cRed, Am(255, 51, 102, 0.5))
+      END
+    END
+  END Cfs;
+
+  PROCEDURE Gol;   (* desktopul fara fereastra *)
+  BEGIN
+    Ecran.Culoare(Ecran.RGB(58, 58, 92)); TC(W DIV 2, tbY - D(40), D(12), "atinge o fereastră de jos")
+  END Gol;
+
+  (* ---------- ce merge si cu fereastra inchisa ---------- *)
+
+  PROCEDURE Tic;
+    VAR i, k, n, f, t: INTEGER; s: ARRAY 32 OF CHAR; m: ARRAY 80 OF CHAR;
+  BEGIN
+    Sal.Ruleaza(1500);
+    FOR i := 0 TO Sal.NrIesiri() - 1 DO Sal.Iesire(i, m); Rand(cGreen, m) END;
+    Sal.Goleste;
+    IF Tor7.Scrieri() # scrVazute THEN scrVazute := Tor7.Scrieri(); undaDe := acum END;
+    IF Sal.Trimise() - vazTrimise > Sal.NK THEN vazTrimise := Sal.Trimise() - Sal.NK END;
+    WHILE vazTrimise < Sal.Trimise() DO
+      Sal.Pachet(vazTrimise, f, t);
+      IF (cur = 1) & (npk < NP) THEN
+        pkF[npk] := f; pkT[npk] := t; pkU[npk] := 0.0;
+        IF Sal.Stare(t) # Sal.Liber THEN pkC[npk] := cGreen ELSE pkC[npk] := cRed END;
+        INC(npk)
+      END;
+      INC(vazTrimise)
+    END;
+    IF (instEu >= 0) & (acum - instDe >= 1200) THEN
+      NumePkg(instEu, s); k := CFS.Scrie(s, adesc[instEu]); Sunet.Nota(370, 200, 40); instEu := -1
+    END;
+    IF arp & (acum - ultimArp >= 180) THEN
+      ultimArp := acum; n := Aprinse();
+      IF n = 0 THEN arp := FALSE
+      ELSE
+        arpI := arpI MOD n; k := -1; i := -1;
+        REPEAT INC(i); IF on[i] THEN INC(k) END UNTIL k = arpI;
+        Sunet.Nota(Hz(i), 250, 35); INC(arpI)
+      END
+    END
+  END Tic;
+
+  PROCEDURE PornesteDesktop;
+  BEGIN
+    PunStele;
+    Rand(cGold, "CUBICUM OS v1.0 · Shell Z₇ · apasă help");
+    Rand(cCyan, "Cubicum FS montat: fișierele stau în cub, la (x, y, z) · apasă cfs");
+    Rand(cCyan, "∿ Salamandra: 7 ture ale spiralei pentru procese · pornește programe din Process");
+    cur := 3
+  END PornesteDesktop;
+
+  (* ---------- atingerea ---------- *)
+
+  PROCEDURE ApasaCfs(x, y: INTEGER);
+    VAR i, n, px, py, ax, ay, az, bxx, byy, w, h, best, bd, dd: INTEGER; c: ARRAY LC OF CHAR; s: ARRAY 32 OF CHAR;
+  BEGIN
+    n := CFS.N();
+    IF vede >= 0 THEN
+      CFS.Nume(vede, s); CfsB(1, bxx, byy, w, h);
+      IF (CFS.Tip(s) = 4) & In(x, y, bxx, byy, w, h) THEN
+        i := Sal.Porneste(s); IF i >= 0 THEN procSel := i; vmSel := i; cur := 0; vede := -1 END
+      ELSE CfsB(0, bxx, byy, w, h); IF In(x, y, bx, byy, bw, h) THEN vede := -1 END
+      END
+    ELSE
+      CfsB(0, bxx, byy, w, h);
+      IF In(x, y, bxx, byy, w, h) THEN
+        IF sel >= 0 THEN
+          CFS.Nume(sel, s);
+          IF CFS.Tip(s) = 2 THEN CFS.Continut(sel, c); IncarcaAcord(c); cur := 5; Acord
+          ELSE vede := sel
+          END
+        END
+      ELSE
+        CfsB(1, bxx, byy, w, h);
+        IF In(x, y, bxx, byy, w, h) THEN
+          IF sel >= 0 THEN
+            IF acum - ardeDe < 3000 THEN CFS.Arde(sel); sel := -1; ardeDe := -10000; Sunet.Nota(110, 500, 30)
+            ELSE ardeDe := acum
+            END
+          END
+        ELSIF (y >= lY0) & (y < lY1) THEN
+          i := (y - lY0 + scroll[7]) DIV rowH;
+          IF (i >= 0) & (i < n) THEN sel := i; ardeDe := -10000; Sunet.Nota(Hz(i MOD 343), 120, 20) END
+        ELSIF y < lY0 - D(36) THEN   (* in cub: fisierul cel mai apropiat *)
+          best := -1; bd := D(18) * D(18);
+          FOR i := 0 TO n - 1 DO
+            CFS.Adresa(i, ax, ay, az); Proiect(ax, ay, az, cCx, cCy, cSt, px, py);
+            dd := (px - x) * (px - x) + (py - y) * (py - y);
+            IF dd <= bd THEN bd := dd; best := i END
+          END;
+          IF best >= 0 THEN sel := best; ardeDe := -10000; scroll[7] := best * rowH - (lY1 - lY0) DIV 2 END
+        END
+      END
+    END
+  END ApasaCfs;
+
+  PROCEDURE ApasaOrga(x, y: INTEGER);
+    VAR i, k, px, py, bxx, byy, w, h, best, bd, dd: INTEGER;
+  BEGIN
+    k := -1;
+    FOR i := 0 TO 4 DO OrgaB(i, bxx, byy, w, h); IF In(x, y, bxx, byy, w, h) THEN k := i END END;
+    IF k = 0 THEN Acord
+    ELSIF k = 1 THEN IF arp THEN arp := FALSE ELSIF Aprinse() > 0 THEN arp := TRUE; arpI := 0; ultimArp := acum - 180 END
+    ELSIF k = 2 THEN
+      arp := FALSE;
+      FOR i := 0 TO 342 DO on[i] := FALSE END;
+      FOR i := 0 TO 6 DO on[i * 49 + Rnd(49)] := TRUE END;
+      Acord
+    ELSIF k = 3 THEN arp := FALSE; FOR i := 0 TO 342 DO on[i] := FALSE END
+    ELSIF k = 4 THEN SalveazaAcord
+    ELSIF y < oBtnY - D(4) THEN   (* nodul cel mai apropiat; la egalitate castiga stratul de sus, desenat ultimul *)
+      best := -1; bd := D(15) * D(15);
+      FOR i := 0 TO 342 DO NodP(i, px, py); dd := (px - x) * (px - x) + (py - y) * (py - y); IF dd <= bd THEN bd := dd; best := i END END;
+      IF best >= 0 THEN
+        IF on[best] THEN on[best] := FALSE ELSE on[best] := TRUE; Sunet.Nota(Hz(best), 500, 40) END
+      END
+    END
+  END ApasaOrga;
+
+  PROCEDURE Burn;   (* doua atingeri in 3 secunde *)
+  BEGIN
+    IF acum - salDe < 3000 THEN Sal.Arde; salDe := -10000; procSel := -1; Sunet.Nota(98, 900, 40)
+    ELSE salDe := acum
+    END
+  END Burn;
+
+  PROCEDURE ApasaProc(x, y: INTEGER);
+    VAR i, k, n, bxx, byy, w, h: INTEGER; idx: ARRAY 8 OF INTEGER; s: ARRAY 32 OF CHAR;
+  BEGIN
+    FOR i := 0 TO Sal.NP - 1 DO IF In(x, y, bx, ProcRand(i), bw, D(30)) THEN procSel := i; vmSel := i END END;
+    ProcB(0, bxx, byy, w, h);
+    IF In(x, y, bxx, byy, w, h) & (procSel >= 0) THEN Sal.Opreste(procSel) END;
+    ProcB(1, bxx, byy, w, h);
+    IF In(x, y, bxx, byy, w, h) THEN Burn END;
+    n := Progs(idx);
+    FOR i := 0 TO n - 1 DO
+      ProgB(i, bxx, byy, w, h);
+      IF In(x, y, bxx, byy, w, h) THEN CFS.Nume(idx[i], s); k := Sal.Porneste(s); IF k >= 0 THEN procSel := k; vmSel := k END END
+    END
+  END ApasaProc;
+
+  PROCEDURE Apasa(x, y: INTEGER);
+    VAR i, k, bxx, byy, w, h: INTEGER;
+  BEGIN
+    IF y >= tbY THEN
+      FOR i := 0 TO NF - 1 DO
+        TbBtn(i, bxx, byy, w, h);
+        IF In(x, y, bxx, byy, w, h) THEN
+          IF cur = i THEN cur := -1 ELSE cur := i; IF i = 7 THEN vede := -1 END END
+        END
+      END
+    ELSIF y < barH THEN
+      IF (x > W DIV 2 - D(50)) & (x < W DIV 2 + D(90)) THEN Burn END
+    ELSIF (cur >= 0) & In(x, y, wx, wy, ww, titH) THEN
+      IF x > wx + ww - D(64) THEN cur := -1 END
+    ELSIF cur = 0 THEN ApasaProc(x, y)
+    ELSIF cur = 4 THEN
+      IF (y >= by + D(24)) & (y < by + D(72)) THEN
+        k := 1; WHILE (k < 7) & (Sal.Stare((vmSel + k) MOD 7) = Sal.Liber) DO INC(k) END;
+        vmSel := (vmSel + k) MOD 7
+      END
+    ELSIF cur = 2 THEN
+      FOR i := 0 TO 7 DO
+        IF In(x, y, bx, by + D(36) + i * D(50), bw, D(44)) & (StareAlch(i) = 0) & (instEu < 0) THEN
+          instEu := i; instDe := acum; Sunet.Nota(294, 300, 25)
+        END
+      END
+    ELSIF cur = 3 THEN
+      FOR k := 0 TO 9 DO ShellB(k, bxx, byy, w, h); IF In(x, y, bxx, byy, w, h) THEN Exec(k) END END
+    ELSIF cur = 5 THEN ApasaOrga(x, y)
+    ELSIF cur = 7 THEN ApasaCfs(x, y)
+    END
+  END Apasa;
+
+  PROCEDURE Atinge*;   (* o atingere scurta = apasare; o tragere = derulare (Shell, Trilogia, lista din Cubicum FS) *)
+    VAR ap: BOOLEAN; x, y: INTEGER;
+  BEGIN
+    ap := Ecran.Apasat(); x := Ecran.AtinsX(); y := Ecran.AtinsY();
+    IF booted THEN
+      Asaza;
+      IF ap & ~era THEN jx := x; jy := y; ultimY := y; mutat := 0
+      ELSIF ap & era THEN
+        IF ABS(y - jy) > D(10) THEN mutat := 1 END;
+        IF (mutat = 1) & (cur >= 0) THEN
+          IF cur = 3 THEN scroll[3] := scroll[3] + (y - ultimY) ELSE scroll[cur] := scroll[cur] + (ultimY - y) END
+        END;
+        ultimY := y
+      ELSIF ~ap & era & (mutat = 0) THEN Apasa(jx, jy)
+      END
+    END;
+    era := ap
+  END Atinge;
+
+  PROCEDURE Deseneaza*;   (* la fiecare cadru *)
+    VAR e: INTEGER;
+  BEGIN
+    Asaza; acum := Sunet.Ms();
+    IF t0 < 0 THEN t0 := acum; ultimCadru := acum END;
+    dt := acum - ultimCadru; IF dt > 100 THEN dt := 100 ELSIF dt < 0 THEN dt := 0 END;
+    ultimCadru := acum;
+    e := acum - t0;
+    IF ~booted & (e >= 5800) THEN booted := TRUE; PornesteDesktop END;
+    IF ~booted THEN Boot(e)
+    ELSE
+      Fundal(e); Tic;
+      IF cur >= 0 THEN
+        CorpFereastra; clip0 := by; clip1 := by + bh;
+        IF cur = 0 THEN Procese ELSIF cur = 1 THEN Retea ELSIF cur = 2 THEN Alchimist ELSIF cur = 3 THEN Shell
+        ELSIF cur = 4 THEN VM ELSIF cur = 5 THEN Orga ELSIF cur = 6 THEN Trilogie ELSE Cfs
+        END;
+        clip0 := 0; clip1 := H;
+        TitluFereastra
+      ELSE Gol
+      END;
+      BaraSus; BaraJos
+    END
+  END Deseneaza;
+
+  (* ---------- pornirea ---------- *)
+
+
+  PROCEDURE Pkg(i: INTEGER; sym, nume, desc: ARRAY OF CHAR);
+  BEGIN Strings.Copy(sym, asym[i]); Strings.Copy(nume, anume[i]); Strings.Copy(desc, adesc[i])
+  END Pkg;
+
+  PROCEDURE Fer(i: INTEGER; ic, t, s: ARRAY OF CHAR);
+  BEGIN Strings.Copy(ic, icon[i]); Strings.Copy(t, titlu[i]); Strings.Copy(s, scurt[i])
+  END Fer;
+
+  PROCEDURE Faza(i: INTEGER; t, s: ARRAY OF CHAR; ms, bar: INTEGER);
+  BEGIN Strings.Copy(t, fazaTxt[i]); Strings.Copy(s, fazaSub[i]); fazaT[i] := ms; fazaBar[i] := bar
+  END Faza;
+
+  PROCEDURE Seamana;   (* prima pornire: Trilogia si pachetele de baza intra in cub *)
+    VAR i, k: INTEGER; c: ARRAY LC OF CHAR; s: ARRAY 32 OF CHAR;
+  BEGIN
+    FOR i := 0 TO 3 DO
+      Strings.Copy(trB[i], c); Strings.Append(" · ", c); Strings.Append(trZ[i], c);
+      IF i = 0 THEN s := "cubicum.txt" ELSIF i = 1 THEN s := "salamandra.txt" ELSIF i = 2 THEN s := "iridium.txt" ELSE s := "teorema.txt" END;
+      k := CFS.Scrie(s, c)
+    END;
+    FOR i := 0 TO 3 DO NumePkg(i, s); k := CFS.Scrie(s, adesc[i]) END
+  END Seamana;
+
+  PROCEDURE L(VAR c: ARRAY OF CHAR; s: ARRAY OF CHAR);   (* un rand de program *)
+  BEGIN Strings.Append(s, c); Strings.AppendChar(0AX, c)
+  END L;
+
+  PROCEDURE Programe;   (* programele Z7 intra in cub (o data) *)
+    VAR c: ARRAY LC OF CHAR; k: INTEGER;
+  BEGIN
+    c := ""; L(c, "# spirala: merge pe tura ei a spiralei"); L(c, "# si scrie 1..6 in tor, cate o celula");
+    L(c, "BAZA R0"); L(c, "SET R2, 2401"); L(c, "ADD R0, R2"); L(c, "SET R4, 7"); L(c, "SET R5, 250");
+    L(c, "bucla: INC R1"); L(c, "MOD R1, R4"); L(c, "ST R1, R0"); L(c, "INC R0"); L(c, "NOTA R1, R3"); L(c, "DORMI R5");
+    L(c, "JMP bucla"); k := CFS.Scrie("spirala.z7", c);
+    c := ""; L(c, "# ecou: tahionul. Doarme pana se schimba"); L(c, "# ceva oriunde in tor, apoi canta campul");
+    L(c, "# (suma intregului tor MOD 7)"); L(c, "SET R1, 2");
+    L(c, "bucla: ASTEAPTA"); L(c, "CAMP R0"); L(c, "NOTA R0, R1"); L(c, "JMP bucla"); k := CFS.Scrie("ecou.z7", c);
+    c := ""; L(c, "# numara pana la 49 = 7 x 7, apoi se opreste"); L(c, "SET R1, 49"); L(c, "SET R2, 100");
+    L(c, "bucla: INC R0"); L(c, "SCRIE R0"); L(c, "MOV R3, R0"); L(c, "EQ R3, R1"); L(c, "JNZ R3, gata"); L(c, "DORMI R2");
+    L(c, "JMP bucla"); L(c, "gata: STOP"); k := CFS.Scrie("numara.z7", c);
+    c := ""; L(c, "# inel: trimite un numar vecinului din inel"); L(c, "# si canta ce primeste. Porneste-l de 2-3 ori");
+    L(c, "# si vezi mesajele in Network."); L(c, "SET R1, 1"); L(c, "SET R0, 1"); L(c, "SET R2, 400");
+    L(c, "bucla: VECIN R3"); L(c, "TRIMITE R1, R3"); L(c, "PRIMESTE R4, R5"); L(c, "NOTA R4, R0"); L(c, "MOV R1, R4");
+    L(c, "INC R1"); L(c, "DORMI R2"); L(c, "JMP bucla"); k := CFS.Scrie("inel.z7", c);
+    k := CFS.Scrie("sistem.txt", "Cubicum OS v1.1 · nucleul Salamandra · procesorul și memoria: torul Z₇ în 7 dimensiuni (7⁷ = 823543 celule) · programele .z7 stau aici, în cub")
+  END Programe;
+
+  PROCEDURE Init;
+    VAR i: INTEGER;
+  BEGIN
+    seed := Os.CurrentTime() * 7919 + 343;
+    z7[0] := 196.0; z7[1] := 220.0; z7[2] := 246.94; z7[3] := 261.63; z7[4] := 293.66; z7[5] := 329.63; z7[6] := 369.99;
+    Faza(0, "· · ·", "void primordial", 0, 0);
+    Faza(1, "✦ OUL", "nucleul imobil · Z₇⁰", 800, 20);
+    Faza(2, "∿ SALAMANDRA", "procesul viu · Ash = ∅", 2000, 50);
+    Faza(3, "⬡ CUBICUM", "spațiul se naște · 7³=343", 3400, 80);
+    Faza(4, "▶ READY", "CUBICUM OS v1.0", 4800, 100);
+    cBg2 := Ecran.RGB(15, 15, 26); cGold := Ecran.RGB(200, 169, 110); cGold2 := Ecran.RGB(232, 201, 142);
+    cCyan := Ecran.RGB(0, 212, 255); cGreen := Ecran.RGB(57, 255, 20); cPurple := Ecran.RGB(139, 92, 246);
+    cRed := Ecran.RGB(255, 51, 102); cDim := Ecran.RGB(58, 58, 92); cText := Ecran.RGB(200, 200, 232);
+    cWin := Ecran.RGB(10, 10, 20); cBord := Am(200, 169, 110, 0.4); cBordF := Am(200, 169, 110, 0.7);
+    cTitlu := Ecran.RGB(25, 23, 27); cYel := Ecran.RGB(251, 191, 36);
+    Fer(0, "◎", "Process Manager", "Process"); Fer(1, "❖", "Network Layer", "Network");
+    Fer(2, "△", "ALCHIMIST — Pachete", "Alchimist"); Fer(3, "⬡", "Shell Z₇", "Shell");
+    Fer(4, "·", "VM Z₇ — Registre", "VM"); Fer(5, "∿", "Orgă Z₇ · CRDA", "Orgă");
+    Fer(6, "✦", "Trilogia COD", "Trilogia"); Fer(7, "▣", "Cubicum FS", "CFS");
+    Pkg(0, "∿", "z7-kernel", "Nucleul toroidal Z₇⁴"); Pkg(1, "◎", "cubicum-wm", "Window Manager izometric");
+    Pkg(2, "⬡", "crda-audio", "Motor audio 343 noduri"); Pkg(3, "△", "salamandra", "Procesul etern · nu arde");
+    Pkg(4, "✦", "tabloul-canta", "Sonificator pictură 7×7"); Pkg(5, "·", "soroban-7", "Calculator baza 7");
+    Pkg(6, "❖", "iridium-photon", "Driver fotonic Ir (Z₇ cristal)"); Pkg(7, "⊛", "cartea-cubului", "Cartea Cubului · Jahbalon");
+    cmd[0] := "help"; cmd[1] := "ver"; cmd[2] := "who"; cmd[3] := "ls"; cmd[4] := "ps";
+    cmd[5] := "ash"; cmd[6] := "cube"; cmd[7] := "z7"; cmd[8] := "cfs"; cmd[9] := "clear";
+    obt[0] := "▶ CHORD"; obt[1] := "⟳ ARP"; obt[2] := "⁂ RAND"; obt[3] := "✕ CLEAR"; obt[4] := "▣ SALVEAZĂ";
+    trN[0] := "I."; trT[0] := "CUBICUM";
+    trB[0] := "La început era Cubul. Și Cubul era Z₇. Și Z₇ era toroidal, fără margini, fără centru, fără exterior.";
+    trZ[0] := "Z₇⁴ → 7×7×7×7 = 2401 stări · universul nostru";
+    trN[1] := "II."; trT[1] := "SALAMANDRA";
+    trB[1] := "Salamandra trăiește în foc și nu arde. Procesul etern. Oul nu se mișcă — din el se naște tot. La capătul fiecărei sesiuni, Burn distruge tot. Rămâne Ash. Eroarea conservată e cunoaștere.";
+    trZ[1] := "ASH = {erori · să nu se repete} · Salamandra ≠ Burn";
+    trN[2] := "III."; trT[2] := "IRIDIUM";
+    trB[2] := "Ir · Z=77 · FCC · 7³=343 celule. Cristalul ordinului 7. Superior diamantului artificial pentru calcul fotonic. Am experimentat difracție pe iridiu în anii '80. Lumina știa deja.";
+    trZ[2] := "77 = 7×11 · 343 = 7³ · Ir = cristal Z₇";
+    trN[3] := "∞"; trT[3] := "TEOREMA FUNDAMENTALĂ CUBICUM";
+    trB[3] := "În spațiul toroidal Z₇, cel mai scurt drum între două puncte descrie un cub.";
+    trZ[3] := "◻ = geodezică minimă · T³(Z₇) · QED";
+    FOR i := 0 TO 342 DO on[i] := FALSE END;
+    FOR i := 0 TO NF - 1 DO scroll[i] := 0; inalt[i] := 0 END;
+    t0 := -1; faza := 0; fazaSunata := 0; booted := FALSE; cur := -1; era := FALSE;
+    npk := 0; instEu := -1; nsl := 0; ultimaCmd := ""; vmSel := 0; procSel := -1; salDe := -10000; undaDe := -10000; scrVazute := 0; vazTrimise := 0; arp := FALSE; mesajPana := 0;
+    sel := -1; vede := -1; ardeDe := -10000; ceasT := -1;
+    Sunet.Reverb(25);
+    IF CFS.Porneste() THEN Seamana END;
+    IF CFS.Gaseste("sistem.txt") < 0 THEN Programe END
+  END Init;
+
+BEGIN
+  Init
+END CubicumOS.
+

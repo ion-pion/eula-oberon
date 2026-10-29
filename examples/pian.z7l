@@ -1,0 +1,16 @@
+(* pian: atingi o bandă, sună o notă *)
+h := INALTIME
+WHILE 1 = 1 DO
+  STERGE
+  i := 0
+  WHILE i < 7 DO
+    CULOARE(60 + i * 25, 40, 120); DREPT(i * 49, 0, 47, h)
+    i := i + 1
+  END
+  x := ATINSX
+  IF x >= 0 THEN
+    NOTA(x DIV 49 + 1, 4)
+    CULOARE(240, 186, 118); CERC(x, ATINSY, 20)
+  END
+  ARATA; DORMI(120)
+END
